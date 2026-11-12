@@ -23,9 +23,10 @@
 #include <sys/random.h>
 #include <sys/prctl.h>
 #include <sys/syscall.h>
+#include <pthread.h>
 
-const char* d_loc_file = "?";
-int d_loc_line = 0;
+_Thread_local const char* d_loc_file = "?";
+_Thread_local int d_loc_line = 0;
 static int d_argc;
 static char** d_argv;
 
@@ -192,7 +193,7 @@ V d_list(int64_t n, V* items) {
 }
 static void list_unique(V* p) {
   DList* l = L(*p);
-  if (l->h.rc == 1) return;
+  if (d_unique(&l->h)) return;
   V c = list_new(l->len);
   for (int64_t i = 0; i < l->len; i++) L(c)->items[i] = d_retain(l->items[i]);
   L(c)->len = l->len;
@@ -210,12 +211,19 @@ static V tup2(V a, V b) { V x[2] = {a, b}; return d_tuple(2, x); }
 
 V d_adt(DType* t, int tag, int n, V* f) {
   if (n == 0) {
-    if (!t->units) t->units = calloc((size_t)t->nv, sizeof(V));
+    V* u = __atomic_load_n(&t->units, __ATOMIC_ACQUIRE);
+    DObj* o = u ? __atomic_load_n(&u[tag].o, __ATOMIC_ACQUIRE) : NULL;
+    if (o) return mk(K_ADT, o);
+    static pthread_mutex_t units_mu = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&units_mu);
+    if (!t->units) __atomic_store_n(&t->units, (V*)calloc((size_t)t->nv, sizeof(V)), __ATOMIC_RELEASE);
     if (!t->units[tag].o) {
       DAdt* a = newobj(sizeof(DAdt));
       a->h.rc = 0; a->t = t; a->tag = tag; a->n = 0;
-      t->units[tag] = mk(K_ADT, a);
+      t->units[tag].k = K_ADT;
+      __atomic_store_n(&t->units[tag].o, &a->h, __ATOMIC_RELEASE);
     }
+    pthread_mutex_unlock(&units_mu);
     return t->units[tag];
   }
   DAdt* a = newobj(sizeof(DAdt) + (size_t)n * sizeof(V));
@@ -225,7 +233,7 @@ V d_adt(DType* t, int tag, int n, V* f) {
 }
 static void adt_unique(V* p) {
   DAdt* a = A(*p);
-  if (a->h.rc == 1) return;
+  if (d_unique(&a->h)) return;
   DAdt* c = newobj(sizeof(DAdt) + (size_t)a->n * sizeof(V));
   c->t = a->t; c->tag = a->tag; c->n = a->n;
   for (int i = 0; i < a->n; i++) c->f[i] = d_retain(a->f[i]);
@@ -260,8 +268,39 @@ V d_with(V base, int n, const int* idx, V* vals) {
   for (int k = 0; k < n; k++) { d_release(A(base)->f[idx[k]]); A(base)->f[idx[k]] = vals[k]; }
   return base;
 }
-V d_task(V v) { DTask* t = newobj(sizeof(DTask)); t->val = v; return mk(K_TASK, t); }
-void d_immortal(V v) { if (v.k >= K_STR) v.o->rc = 0; }
+/* constants are immortal and readable from every thread: what they reach is shared */
+void d_immortal(V v) { if (v.k >= K_STR && __atomic_load_n(&v.o->rc, __ATOMIC_RELAXED) != 0) { d_share(v); __atomic_store_n(&v.o->rc, 0, __ATOMIC_RELAXED); } }
+static pthread_mutex_t const_mu = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
+void d_const_lock(void) { pthread_mutex_lock(&const_mu); }
+void d_const_unlock(void) { pthread_mutex_unlock(&const_mu); }
+
+/* Mark v and everything it reaches as shared. Stops at shared or immortal objects: a shared object's
+   descendants are shared, because in-place mutation needs rc == 1 (d_unique makes it local first). */
+#define RC_OF(o) __atomic_load_n(&(o)->rc, __ATOMIC_RELAXED)
+void d_share(V v) {
+  if (v.k < K_STR || RC_OF(v.o) <= 0) return;
+  V small[64];
+  V* st = small;
+  int64_t n = 0, cap = 64;
+#define PUSH(x) do { V x_ = (x); if (x_.k >= K_STR && RC_OF(x_.o) > 0) { if (n == cap) { V* ns = xmalloc((size_t)cap * 2 * sizeof(V)); memcpy(ns, st, (size_t)n * sizeof(V)); if (st != small) free(st); st = ns; cap *= 2; } st[n++] = x_; } } while (0)
+  PUSH(v);
+  while (n) {
+    V x = st[--n];
+    int64_t r = RC_OF(x.o);
+    if (r <= 0) continue;
+    x.o->rc = -r;
+    switch (x.k) {
+    case K_LIST: for (int64_t i = 0; i < L(x)->len; i++) PUSH(L(x)->items[i]); break;
+    case K_MAP: case K_SET: { DMap* m = M(x); for (int64_t i = 0; i < m->n; i++) if (m->e[i].live) { PUSH(m->e[i].key); PUSH(m->e[i].val); } break; }
+    case K_TUPLE: for (int64_t i = 0; i < T(x)->n; i++) PUSH(T(x)->items[i]); break;
+    case K_ADT: for (int i = 0; i < A(x)->n; i++) PUSH(A(x)->f[i]); break;
+    case K_FN: { DFn* f = (DFn*)x.o; for (int i = 0; i < f->nenv; i++) PUSH(f->env[i]); break; }
+    default: break;  /* strings, bytes, ranges, handles; tasks and channels share their contents themselves */
+    }
+  }
+#undef PUSH
+  if (st != small) free(st);
+}
 
 V d_fn_new(V (*code)(DFn*, V*), int arity, int nenv, V* env) {
   DFn* f = newobj(sizeof(DFn) + (size_t)nenv * sizeof(V));
@@ -367,7 +406,7 @@ static int map_take(DMap* m, V key, V* out) {
 static void map_compact(DMap* m) { if (m->len != m->n) map_rebuild(m, m->cap); }
 static void map_unique(V* p) {
   DMap* m = M(*p);
-  if (m->h.rc == 1) return;
+  if (d_unique(&m->h)) return;
   V c = map_new(p->k, m->len);
   for (int64_t i = 0; i < m->n; i++)
     if (m->e[i].live) map_add_new(M(c), d_retain(m->e[i].key), d_retain(m->e[i].val), m->e[i].hash);
@@ -381,6 +420,7 @@ V d_map(int64_t n, V* kv) {
 }
 
 static void db_close(DHandle* h);
+static void chan_end_free(DChan* e);
 
 /* ------------------------------------------------------------------ free */
 
@@ -398,8 +438,8 @@ void d_free(V v) {
   case K_ADT: { DAdt* a = A(v); for (int i = 0; i < a->n; i++) d_release(a->f[i]); break; }
   case K_FN: { DFn* f = (DFn*)v.o; for (int i = 0; i < f->nenv; i++) d_release(f->env[i]); break; }
   case K_HANDLE: { DHandle* h = (DHandle*)v.o; if (h->fd >= 0) close(h->fd); if (h->dbk) db_close(h); free(h->path); break; }
-  case K_TASK: d_release(((DTask*)v.o)->val); break;
-  case K_CHAN: { DChan* c = (DChan*)v.o; d_release(mk(K_LIST, c->q)); break; }
+  case K_TASK: { DTask* t = (DTask*)v.o; d_release(t->val); d_release(t->fn); break; }
+  case K_CHAN: chan_end_free((DChan*)v.o); break;
   default: break;
   }
   free(v.o);
@@ -644,7 +684,7 @@ void d_buf_show(DBuf* b, V v, int top) { d_show_into(b, v, top); d_release(v); }
 static V seq_concat(V a, V b) {
   DStr *x = S(a), *y = S(b);
   int64_t n = x->len + y->len;
-  if (x->h.rc == 1) {
+  if (d_unique(&x->h)) {
     if (n > x->cap) {
       int64_t c = x->cap * 2;
       if (c < n) c = n;
@@ -930,24 +970,6 @@ int d_run_tests(const DTest* t, int n, int argc, char** argv) {
 
 V d_n_core_error(V msg) { return mkerror(msg); }
 V d_n_core_panic(V msg) { d_panic_v(msg); }
-V d_n_core_channel(V cap) {
-  if (cap.i < 0) d_panic_c("`requires` of `channel` failed: capacity >= 0");
-  DChan* c = newobj(sizeof(DChan));
-  V q = list_new(0);
-  c->q = L(q);
-  c->head = 0;
-  V ch = mk(K_CHAN, c);
-  return tup2(d_retain(ch), ch);
-}
-V d_n_core_Sender_send(V s, V item) { DChan* c = (DChan*)s.o; lpush(mk(K_LIST, c->q), item); d_release(s); return D_UNIT; }
-V d_n_core_Receiver_recv(V r) {
-  DChan* c = (DChan*)r.o;
-  V out = d_none();
-  if (c->head < c->q->len) { out = d_some(c->q->items[c->head]); c->q->items[c->head] = D_UNIT; c->head++; }
-  d_release(r);
-  return out;
-}
-V d_n_core_Task_join(V t) { V r = d_retain(((DTask*)t.o)->val); d_release(t); return r; }
 
 /* Int */
 V d_n_core_Int_to_float(V x) { return d_float((double)x.i); }
@@ -1327,7 +1349,6 @@ V d_n_core_List_map(V l, V f) {
   d_release(l); d_release(f);
   return r;
 }
-V d_n_core_List_par_map(V l, V f) { return d_n_core_List_map(l, f); }
 V d_n_core_List_filter(V l, V f) {
   V r = list_new(0);
   for (int64_t i = 0; i < L(l)->len; i++) if (call1(f, d_retain(L(l)->items[i])).i) lpush(r, d_retain(L(l)->items[i]));
@@ -1587,7 +1608,9 @@ V d_n_io_read_line(void) {
   fflush(stdout);
   char* line = NULL;
   size_t cap = 0;
+  d_block_enter();
   ssize_t n = getline(&line, &cap, stdin);
+  d_block_exit();
   if (n < 0) { free(line); return d_none(); }
   if (n && line[n - 1] == '\n') n--;
   if (n && line[n - 1] == '\r') n--;
@@ -1621,10 +1644,10 @@ V d_n_time_now_ms(void) {
 }
 V d_n_time_sleep_ms(V ms) {
   fflush(stdout);
-  if (ms.i > 0) { struct timespec ts = {ms.i / 1000, (ms.i % 1000) * 1000000}; nanosleep(&ts, NULL); }
+  if (ms.i > 0) { struct timespec ts = {ms.i / 1000, (ms.i % 1000) * 1000000}; d_block_enter(); nanosleep(&ts, NULL); d_block_exit(); }
   return D_UNIT;
 }
-static uint64_t rng_state;
+static _Thread_local uint64_t rng_state;
 static uint64_t rng(void) {
   if (!rng_state) {
     if (getrandom(&rng_state, sizeof rng_state, 0) != (ssize_t)sizeof rng_state) rng_state = 0;
@@ -1746,6 +1769,7 @@ V d_n_fs_open(V path, V mode) {
     h->fd = fd;
     h->dbk = 0;
     h->db = NULL;
+    h->mu = NULL;
     h->path = strdup(S(path)->p);
     r = d_ok(mk(K_HANDLE, h));
   }
@@ -2345,7 +2369,15 @@ static struct {
   void (*err_str)(unsigned long, char*, size_t);
 } tls;
 
+static int tls_load_locked(void);
 static int tls_load(void) {
+  static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+  pthread_mutex_lock(&mu);
+  int r = tls_load_locked();
+  pthread_mutex_unlock(&mu);
+  return r;
+}
+static int tls_load_locked(void) {
   if (tls.tried) return tls.ctx != NULL;
   tls.tried = 1;
   void* ssl = dlopen("libssl.so.3", RTLD_NOW | RTLD_GLOBAL);
@@ -2674,7 +2706,14 @@ static char* resolve_location(const Url* base, const char* loc) {
   return b.p;
 }
 
+static V http_do_inner(const char* method0, V url, V headers, V body, int errors_for_status);
 static V http_do(const char* method0, V url, V headers, V body, int errors_for_status) {
+  d_block_enter();
+  V r = http_do_inner(method0, url, headers, body, errors_for_status);
+  d_block_exit();
+  return r;
+}
+static V http_do_inner(const char* method0, V url, V headers, V body, int errors_for_status) {
   char err[400];
   char method[16];
   snprintf(method, sizeof method, "%s", method0);
@@ -2715,7 +2754,7 @@ static V http_do(const char* method0, V url, V headers, V body, int errors_for_s
   free(cur);
   return result;
 }
-static void http_init_once(void) { static int done; if (!done) { done = 1; signal(SIGPIPE, SIG_IGN); } }
+static void http_init_once(void) { signal(SIGPIPE, SIG_IGN); }
 V d_n_http_get(V url) {
   http_init_once();
   V r = http_do("GET", url, D_UNIT, D_UNIT, 1);
@@ -2926,6 +2965,7 @@ done:
   shutdown(fd, SHUT_WR);
   conn_close(&c);
 }
+static void serve_spawn(int fd, V handler);
 V d_n_http_serve(V addr, V handler) {
   http_init_once();
   char host[256] = "", port[8] = "";
@@ -2960,11 +3000,17 @@ V d_n_http_serve(V addr, V handler) {
   if (fd < 0) { snprintf(err, sizeof err, "cannot listen on %.100s: %s", a->p, strerror(last)); d_release(addr); d_release(handler); return http_error(err, 0); }
   d_release(addr);
   fflush(stdout);
+  d_share(handler);
   for (;;) {
+    d_block_enter();
     int cfd = accept4(fd, NULL, NULL, SOCK_CLOEXEC);
-    if (cfd < 0) { if (errno == EINTR || errno == ECONNABORTED || errno == EMFILE || errno == ENFILE) continue; break; }
-    serve_one(cfd, handler);
-    fflush(stdout);
+    d_block_exit();
+    if (cfd < 0) {
+      if (errno == EMFILE || errno == ENFILE) { struct timespec ts = {0, 50000000}; nanosleep(&ts, NULL); continue; }
+      if (errno == EINTR || errno == ECONNABORTED) continue;
+      break;
+    }
+    serve_spawn(cfd, handler);
   }
   snprintf(err, sizeof err, "accept failed: %s", strerror(errno));
   close(fd);
@@ -4490,7 +4536,12 @@ static struct {
 } pq;
 static void pq_quiet(void* arg, const char* msg) { (void)arg; (void)msg; }
 
-static int sq_load(void) {
+static pthread_mutex_t dbload_mu = PTHREAD_MUTEX_INITIALIZER;
+static int sq_load_locked(void);
+static int pq_load_locked(void);
+static int sq_load(void) { pthread_mutex_lock(&dbload_mu); int r = sq_load_locked(); pthread_mutex_unlock(&dbload_mu); return r; }
+static int pq_load(void) { pthread_mutex_lock(&dbload_mu); int r = pq_load_locked(); pthread_mutex_unlock(&dbload_mu); return r; }
+static int sq_load_locked(void) {
   if (sq.tried) return sq.err[0] == 0;
   sq.tried = 1;
   void* h = dlopen("libsqlite3.so.0", RTLD_NOW | RTLD_LOCAL);
@@ -4507,7 +4558,7 @@ static int sq_load(void) {
 #undef SYM
   return 1;
 }
-static int pq_load(void) {
+static int pq_load_locked(void) {
   if (pq.tried) return pq.err[0] == 0;
   pq.tried = 1;
   void* h = dlopen("libpq.so.5", RTLD_NOW | RTLD_LOCAL);
@@ -4525,7 +4576,11 @@ static int pq_load(void) {
 static void db_close(DHandle* h) {
   if (h->db) { if (h->dbk == 1) sq.close_v2(h->db); else pq.finish(h->db); }
   h->db = NULL;
+  if (h->mu) { pthread_mutex_destroy(h->mu); free(h->mu); h->mu = NULL; }
 }
+/* one statement at a time per connection (libpq connections are not thread-safe); waiting is blocking */
+static void db_lock(DHandle* h) { d_block_enter(); pthread_mutex_lock(h->mu); }
+static void db_unlock(DHandle* h) { pthread_mutex_unlock(h->mu); d_block_exit(); }
 
 static V db_err(const char* code, const char* fmt, ...) {
   char msg[1024];
@@ -4576,6 +4631,8 @@ V d_n_db_open(V url) {
   h->path = strdup(u);
   h->dbk = pg ? 2 : 1;
   h->db = NULL;
+  h->mu = xmalloc(sizeof(pthread_mutex_t));
+  pthread_mutex_init(h->mu, NULL);
   r = mk(K_HANDLE, h);
   if (pg) {
     h->db = pq.connectdb(u);
@@ -4843,8 +4900,9 @@ static V db_run(V conn, V sql, V params, const DTy* ty, int mode) {
   int np = db_params(params, ps, DB_MAX_PARAMS);
   V r;
   char err[600];
-  if (np < 0) { r = db_err("42000", "at most %d parameters", DB_MAX_PARAMS); goto done; }
-  if (!h->db) { r = db_err("08000", "the connection is closed"); goto done; }
+  if (np < 0) { r = db_err("42000", "at most %d parameters", DB_MAX_PARAMS); goto out; }
+  if (!h->db) { r = db_err("08000", "the connection is closed"); goto out; }
+  db_lock(h);
   if (h->dbk == 1) {
     void* st = NULL;
     r = sq_prepare(h, sql, ps, np, &st);
@@ -4882,6 +4940,8 @@ static V db_run(V conn, V sql, V params, const DTy* ty, int mode) {
     else { r = d_ok(nt ? d_some(d_retain(L(list)->items[0])) : d_none()); d_release(list); }
   }
 done:
+  db_unlock(h);
+out:
   d_release(conn); d_release(sql); d_release(params);
   return r;
 }
@@ -4891,6 +4951,7 @@ V d_n_db_Conn_query_one(V c, V sql, V params, const DTy* ty) { return db_run(c, 
 V d_n_db_Conn_exec_script(V c, V sql) {
   DHandle* h = H(c);
   V r = d_ok(D_UNIT);
+  if (h->db) db_lock(h);
   if (!h->db) r = db_err("08000", "the connection is closed");
   else if (h->dbk == 1) {
     char* msg = NULL;
@@ -4904,6 +4965,295 @@ V d_n_db_Conn_exec_script(V c, V sql) {
       if (st != 0 && st != 1 && st != 2) r = pq_fail_res(res); else pq.clear(res);
     }
   }
+  if (h->mu && h->db) db_unlock(h);
   d_release(c); d_release(sql);
   return r;
+}
+
+/* ------------------------------------------------------------------ tasks
+   M tasks on a pool of OS threads. At most `ncpu` threads run Drift code at once (the main thread counts);
+   a thread that blocks (network, db, sleep, stdin, join, channel) gives its slot to a queued task, starting
+   another worker if none is idle (up to SCH_MAX_THREADS). Joining a task that has not started runs it inline.
+   A wait with every busy thread waiting, an empty queue and no progress for a second is a deadlock: panic.
+   DRIFT_THREADS overrides the number of running threads. */
+
+#define SCH_MAX_THREADS 256
+static pthread_mutex_t sch_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t sch_work = PTHREAD_COND_INITIALIZER, sch_done = PTHREAD_COND_INITIALIZER;
+static DTask *q_head, *q_tail;
+static int sch_on, sch_ncpu, sch_running = 1, sch_idle, sch_starting, sch_threads, sch_busy = 1, sch_waiting;
+static uint64_t sch_progress;
+static _Thread_local int blk_depth, blk_counted;
+
+static void sch_init_locked(void) {
+  if (sch_ncpu) return;
+  const char* e = getenv("DRIFT_THREADS");
+  long n = e ? strtol(e, NULL, 10) : sysconf(_SC_NPROCESSORS_ONLN);
+  sch_ncpu = n < 1 ? 1 : n > 1024 ? 1024 : (int)n;
+}
+static void q_push(DTask* t) { t->next = NULL; t->prev = q_tail; if (q_tail) q_tail->next = t; else q_head = t; q_tail = t; }
+static void q_remove(DTask* t) {
+  if (t->prev) t->prev->next = t->next; else q_head = t->next;
+  if (t->next) t->next->prev = t->prev; else q_tail = t->prev;
+  t->prev = t->next = NULL;
+}
+static void* sch_worker(void* arg);
+/* with sch_mu held: give queued work to an idle worker or a new one while a running slot is free */
+static void sch_kick(void) {
+  if (!q_head || sch_running >= sch_ncpu) return;
+  if (sch_idle > 0) { pthread_cond_signal(&sch_work); return; }
+  if (sch_starting > 0 || sch_threads >= SCH_MAX_THREADS) return;  /* a starting thread will look at the queue */
+  pthread_t th;
+  pthread_attr_t at;
+  pthread_attr_init(&at);
+  pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+  pthread_attr_setstacksize(&at, 8u << 20);
+  if (pthread_create(&th, &at, sch_worker, NULL) == 0) { sch_threads++; sch_starting++; }
+  pthread_attr_destroy(&at);
+}
+static void progress(void) { __atomic_add_fetch(&sch_progress, 1, __ATOMIC_RELAXED); }
+
+static void task_exec(DTask* t) {
+  V r = t->run(t);
+  d_share(r);
+  pthread_mutex_lock(&sch_mu);
+  t->val = r;
+  t->state = 2;
+  progress();
+  pthread_cond_broadcast(&sch_done);
+  pthread_mutex_unlock(&sch_mu);
+  d_release(mk(K_TASK, t));  /* the queue's reference */
+}
+static void* sch_worker(void* arg) {
+  (void)arg;
+  pthread_mutex_lock(&sch_mu);
+  sch_starting--;
+  for (;;) {
+    while (!q_head || sch_running >= sch_ncpu) { sch_idle++; pthread_cond_wait(&sch_work, &sch_mu); sch_idle--; }
+    DTask* t = q_head;
+    q_remove(t);
+    t->state = 1;
+    sch_running++; sch_busy++;
+    sch_kick();
+    pthread_mutex_unlock(&sch_mu);
+    task_exec(t);
+    pthread_mutex_lock(&sch_mu);
+    sch_running--; sch_busy--;
+    sch_kick();
+  }
+  return NULL;
+}
+/* t has rc -2 (the caller's reference and the queue's) or -1 (the queue's only) */
+static void sch_submit(DTask* t) {
+  pthread_mutex_lock(&sch_mu);
+  sch_init_locked();
+  __atomic_store_n(&sch_on, 1, __ATOMIC_RELEASE);
+  t->state = 0;
+  q_push(t);
+  progress();
+  sch_kick();
+  pthread_mutex_unlock(&sch_mu);
+}
+static DTask* task_new(V (*run)(DTask*), V fn, int refs) {
+  DTask* t = newobj(sizeof(DTask));
+  t->h.rc = -refs;
+  t->run = run; t->fn = fn; t->val = D_UNIT; t->state = 0; t->fd = -1; t->aux = NULL; t->prev = t->next = NULL;
+  return t;
+}
+
+void d_block_enter(void) {
+  if (blk_depth++) return;
+  blk_counted = __atomic_load_n(&sch_on, __ATOMIC_ACQUIRE);
+  if (!blk_counted) return;
+  pthread_mutex_lock(&sch_mu);
+  sch_running--;
+  sch_kick();
+  pthread_mutex_unlock(&sch_mu);
+}
+void d_block_exit(void) {
+  if (--blk_depth || !blk_counted) return;
+  pthread_mutex_lock(&sch_mu);
+  sch_running++;
+  pthread_mutex_unlock(&sch_mu);
+}
+/* one wait on cv (with mu held, which is sch_mu or a channel's lock taken before sch_mu) */
+static void sync_wait(pthread_cond_t* cv, pthread_mutex_t* mu, const char* what) {
+  int own = mu == &sch_mu;
+  if (!own) pthread_mutex_lock(&sch_mu);
+  sch_init_locked();
+  sch_running--; sch_waiting++;
+  sch_kick();
+  uint64_t seen = __atomic_load_n(&sch_progress, __ATOMIC_RELAXED);
+  if (!own) pthread_mutex_unlock(&sch_mu);
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  ts.tv_sec += 1;
+  int rc = pthread_cond_timedwait(cv, mu, &ts);
+  if (!own) pthread_mutex_lock(&sch_mu);
+  int dead = rc == ETIMEDOUT && sch_waiting == sch_busy && !q_head && __atomic_load_n(&sch_progress, __ATOMIC_RELAXED) == seen;
+  sch_running++; sch_waiting--;
+  if (!own) pthread_mutex_unlock(&sch_mu);
+  if (dead) panicf("deadlock: every task is waiting (this one on %s); a `recv` returns None only after the sender is closed (`tx.close()`) or dropped", what);
+}
+
+static V run_closure(DTask* t) { V f = t->fn; t->fn = D_UNIT; return d_call(f, 0, NULL); }
+V d_spawn(V fn) {
+  d_share(fn);
+  DTask* t = task_new(run_closure, fn, 2);
+  sch_submit(t);
+  return mk(K_TASK, t);
+}
+/* wait for t (running it here if it has not started); its value is then readable */
+static void task_wait(DTask* t) {
+  pthread_mutex_lock(&sch_mu);
+  if (t->state == 0) {
+    q_remove(t);
+    t->state = 1;
+    pthread_mutex_unlock(&sch_mu);
+    task_exec(t);
+    return;
+  }
+  while (t->state != 2) sync_wait(&sch_done, &sch_mu, "`join`");
+  pthread_mutex_unlock(&sch_mu);
+}
+V d_n_core_Task_join(V tv) {
+  DTask* t = (DTask*)tv.o;
+  task_wait(t);
+  V r = d_retain(t->val);
+  d_release(tv);
+  return r;
+}
+
+/* ---- par_map: helpers claim chunks of indices; the caller works too, then joins them */
+typedef struct PM { V l, f; V* out; int64_t n, chunk, next; } PM;
+static void pm_loop(PM* p, int share) {
+  for (;;) {
+    int64_t lo = __atomic_fetch_add(&p->next, p->chunk, __ATOMIC_RELAXED);
+    if (lo >= p->n) return;
+    int64_t hi = lo + p->chunk < p->n ? lo + p->chunk : p->n;
+    for (int64_t i = lo; i < hi; i++) {
+      V r = call1(p->f, d_retain(L(p->l)->items[i]));
+      if (share) d_share(r);
+      p->out[i] = r;
+    }
+  }
+}
+static V run_pm(DTask* t) { pm_loop(t->aux, 1); return D_UNIT; }
+V d_n_core_List_par_map(V l, V f) {
+  int64_t n = L(l)->len;
+  if (n < 2) return d_n_core_List_map(l, f);
+  pthread_mutex_lock(&sch_mu);
+  sch_init_locked();
+  pthread_mutex_unlock(&sch_mu);
+  d_share(l); d_share(f);
+  int k = n - 1 < 63 ? (int)(n - 1) : 63;
+  PM p = {l, f, xmalloc((size_t)n * sizeof(V)), n, 0, 0};
+  p.chunk = n / ((int64_t)(k + 1) * 8);
+  if (p.chunk < 1) p.chunk = 1;
+  DTask* hs[63];
+  for (int i = 0; i < k; i++) { hs[i] = task_new(run_pm, D_UNIT, 2); hs[i]->aux = &p; sch_submit(hs[i]); }
+  pm_loop(&p, 0);
+  for (int i = 0; i < k; i++) { task_wait(hs[i]); d_release(mk(K_TASK, hs[i])); }
+  V r = list_new(n);
+  memcpy(L(r)->items, p.out, (size_t)n * sizeof(V));
+  L(r)->len = n;
+  free(p.out);
+  d_release(l); d_release(f);
+  return r;
+}
+
+/* ---- http.serve: one task per connection */
+static V run_serve(DTask* t) {
+  serve_one(t->fd, t->fn);
+  fflush(stdout);
+  return D_UNIT;
+}
+static void serve_spawn(int fd, V handler) {
+  DTask* t = task_new(run_serve, d_retain(handler), 1);
+  t->fd = fd;
+  sch_submit(t);
+}
+
+/* ---- channels: a ring buffer under a mutex; capacity 0 makes `send` wait until the item is received */
+typedef struct DChanCore {
+  pthread_mutex_t mu; pthread_cond_t cv;
+  V* buf; int64_t cap, size, head, len;
+  uint64_t sent, taken;
+  int sender, receiver, refs;
+} DChanCore;
+V d_n_core_channel(V cap) {
+  if (cap.i < 0) d_panic_c("`requires` of `channel` failed: capacity >= 0");
+  DChanCore* c = xmalloc(sizeof(DChanCore));
+  pthread_mutex_init(&c->mu, NULL);
+  pthread_cond_init(&c->cv, NULL);
+  c->cap = cap.i;
+  c->size = cap.i > 0 ? cap.i : 1;
+  if (c->size > (1 << 24)) c->size = 1 << 24;
+  c->buf = xmalloc((size_t)c->size * sizeof(V));
+  c->head = c->len = 0; c->sent = c->taken = 0;
+  c->sender = c->receiver = 1; c->refs = 2;
+  DChan* tx = newobj(sizeof(DChan));
+  DChan* rx = newobj(sizeof(DChan));
+  tx->core = rx->core = c;
+  tx->role = 0; rx->role = 1;
+  return tup2(mk(K_CHAN, tx), mk(K_CHAN, rx));
+}
+static void chan_end_free(DChan* e) {
+  DChanCore* c = e->core;
+  pthread_mutex_lock(&c->mu);
+  if (e->role == 0) c->sender = 0; else c->receiver = 0;
+  pthread_cond_broadcast(&c->cv);
+  int last = --c->refs == 0;
+  pthread_mutex_unlock(&c->mu);
+  if (!last) return;
+  for (int64_t i = 0; i < c->len; i++) d_release(c->buf[(c->head + i) % c->size]);
+  free(c->buf);
+  pthread_mutex_destroy(&c->mu);
+  pthread_cond_destroy(&c->cv);
+  free(c);
+}
+V d_n_core_Sender_send(V s, V item) {
+  DChanCore* c = ((DChan*)s.o)->core;
+  d_share(item);
+  pthread_mutex_lock(&c->mu);
+  if (!c->sender) { pthread_mutex_unlock(&c->mu); d_panic_c("`send` on a closed channel"); }
+  while (c->len == c->size && c->receiver) sync_wait(&c->cv, &c->mu, "`send` to a full channel");
+  if (!c->receiver) { pthread_mutex_unlock(&c->mu); d_release(item); d_release(s); return D_UNIT; }  /* nobody will read it */
+  c->buf[(c->head + c->len) % c->size] = item;
+  c->len++;
+  uint64_t mine = ++c->sent;
+  progress();
+  pthread_cond_broadcast(&c->cv);
+  if (c->cap == 0) while (c->taken < mine && c->receiver) sync_wait(&c->cv, &c->mu, "`send` on an unbuffered channel");
+  pthread_mutex_unlock(&c->mu);
+  d_release(s);
+  return D_UNIT;
+}
+V d_n_core_Sender_close(V s) {
+  DChanCore* c = ((DChan*)s.o)->core;
+  pthread_mutex_lock(&c->mu);
+  c->sender = 0;
+  progress();
+  pthread_cond_broadcast(&c->cv);
+  pthread_mutex_unlock(&c->mu);
+  d_release(s);
+  return D_UNIT;
+}
+V d_n_core_Receiver_recv(V r) {
+  DChanCore* c = ((DChan*)r.o)->core;
+  pthread_mutex_lock(&c->mu);
+  while (c->len == 0 && c->sender) sync_wait(&c->cv, &c->mu, "`recv`");
+  V out;
+  if (c->len == 0) out = d_none();
+  else {
+    out = d_some(c->buf[c->head]);
+    c->head = (c->head + 1) % c->size;
+    c->len--;
+    c->taken++;
+    progress();
+    pthread_cond_broadcast(&c->cv);
+  }
+  pthread_mutex_unlock(&c->mu);
+  d_release(r);
+  return out;
 }

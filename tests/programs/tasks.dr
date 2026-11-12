@@ -1,0 +1,105 @@
+struct Stats { name: Str, total: Int, words: List[Str] }
+
+const NAMES: List[Str] = ["ana", "beto", "carla"]
+
+fn fib(n: Int) -> Int {
+  if n < 2 {
+    n
+  } else {
+    fib(n - 1) + fib(n - 2)
+  }
+}
+
+fn stats(name: Str, n: Int) -> Stats {
+  var words: List[Str] = []
+  for i in 0..n {
+    words.push("{name}{i}")
+  }
+  Stats { name: name, total: n * (n - 1) / 2, words: words }
+}
+
+fn produce(tx: Sender[Int], n: Int) -> Int uses spawn {
+  for i in 1..=n {
+    tx.send(i)
+  }
+  tx.close()
+  n
+}
+
+fn consume(rx: Receiver[Int]) -> Int uses spawn {
+  var sum = 0
+  loop {
+    match rx.recv() {
+      Some(x) => {
+        sum += x
+      }
+      None => break
+    }
+  }
+  sum
+}
+
+fn first(p: (Int, Int)) -> Int {
+  let (a, _) = p
+  a
+}
+
+fn second(p: (Int, Int)) -> Int {
+  let (_, b) = p
+  b
+}
+
+fn double(i: Int) -> Int {
+  i * 2
+}
+
+fn fan_in(n: Int) -> List[Int] uses spawn {
+  let (tx, rx) = channel[(Int, Int)](0)
+  var tasks: List[Task[()]] = []
+  for w in 0..n {
+    tasks.push(spawn tx.send((w, fib(15 + w))))
+  }
+  var got: List[(Int, Int)] = []
+  for _ in 0..n {
+    got.push(rx.recv().unwrap_or((-1, -1)))
+  }
+  for t in tasks {
+    t.join()
+  }
+  got.sorted_by(|p| first(p)).map(|p| second(p))
+}
+
+pub fn main() -> Result[(), Error] uses io, spawn {
+  // spawn + join; captured values are shared with the task
+  let base = stats("x", 3)
+  let t = spawn stats("{base.name}y", 5)
+  let u = spawn fib(25)
+  let s = t.join()
+  io.println("{s.name} {s.total} {s.words} {u.join()} {base.words}")
+  // par_map keeps order; results built on other threads are ordinary values afterwards
+  var nums: List[Int] = []
+  for i in 1..=2000 {
+    nums.push(i)
+  }
+  let squares = nums.par_map(|i| i * i)
+  io.println("{squares.len()} {squares.get(0)} {squares.get(1999)} {squares.sum()}")
+  var built = NAMES.par_map(|n| stats(n, 4))
+  built.push(stats("dario", 2))
+  io.println("{built.map(|b| b.words.len())} {built.get(1).map(|b| b.words)}")
+  // nested tasks and joins inside tasks
+  let outer = spawn [1, 2, 3, 4, 5, 6].par_map(|k| (spawn fib(k + 10)).join())
+  io.println("{outer.join()}")
+  // channels: buffered producer/consumer, unbuffered fan-in
+  let (tx, rx) = channel[Int](8)
+  let p = spawn produce(tx, 10000)
+  let c = spawn consume(rx)
+  io.println("{p.join()} {c.join()}")
+  io.println("{fan_in(6)}")
+  // many small tasks
+  var ts: List[Task[Int]] = []
+  for i in 0..3000 {
+    ts.push(spawn double(i))
+  }
+  io.println("{ts.map(|x| x.join()).sum()}")
+  Ok(())
+}

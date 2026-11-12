@@ -1,0 +1,23 @@
+fn produce(tx: Sender[Int]) -> () uses spawn {
+  for i in 0..3 {
+    tx.send(i)
+  }
+}
+
+// the sender is never closed, so the loop waits for a fourth item forever
+pub fn main() -> Result[(), Error] uses io, spawn {
+  let (tx, rx) = channel[Int](4)
+  let t = spawn produce(tx)
+  t.join()
+  var n = 0
+  loop {
+    match rx.recv() {
+      Some(_) => {
+        n += 1
+      }
+      None => break
+    }
+  }
+  io.println("{n}")
+  Ok(())
+}

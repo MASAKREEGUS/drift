@@ -2533,9 +2533,20 @@ impl<'f> Checker<'f> {
             }
             ExprKind::Block(b) => self.block(b, exp, false),
             ExprKind::Spawn(x) => {
+                // the body of a task: like a closure without parameters (`return` and `?` end the task)
                 self.require_effects(1 << 8, e.span, "`spawn`");
-                let t = self.expr(x, None);
-                Ty::Named(c.task, vec![t])
+                self.push_scope();
+                self.closure_depth += 1;
+                let saved_loop = self.loop_depth;
+                self.loop_depth = 0;
+                let r = self.fresh();
+                self.rets.push(r.clone());
+                self.expr(x, Some(&r));
+                self.rets.pop();
+                self.loop_depth = saved_loop;
+                self.closure_depth -= 1;
+                self.pop_scope();
+                Ty::Named(c.task, vec![r])
             }
             ExprKind::Return(v) => {
                 let r = self.rets.last().cloned().unwrap_or(Ty::Err);

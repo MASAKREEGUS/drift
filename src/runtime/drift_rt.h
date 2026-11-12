@@ -8,7 +8,9 @@
 
 enum { K_UNIT, K_BOOL, K_INT, K_FLOAT, K_STR, K_BYTES, K_LIST, K_MAP, K_SET, K_TUPLE, K_ADT, K_FN, K_RANGE, K_HANDLE, K_TASK, K_CHAN };
 
-/* rc > 0: counted; rc == 0: immortal (literals, constants, unit variants). */
+/* rc > 0: counted, owned by one thread; rc == 0: immortal (literals, constants, unit variants);
+   rc < 0: shared between threads, -rc references, counted atomically. A value becomes shared (with
+   everything it reaches) when it crosses to another task: spawn, channel send, task results, par_map. */
 typedef struct DObj { int64_t rc; } DObj;
 typedef struct V { int64_t k; union { int64_t i; double f; DObj* o; }; } V;
 
@@ -23,9 +25,10 @@ typedef struct DAdt { DObj h; DType* t; int32_t tag, n; V f[]; } DAdt;
 typedef struct DFn { DObj h; V (*code)(struct DFn*, V*); int32_t arity, nenv; V env[]; } DFn;
 typedef struct DRange { DObj h; int64_t lo, hi; } DRange;
 /* fd >= 0: a file. db: a database connection (dbk 1 SQLite, 2 PostgreSQL). */
-typedef struct DHandle { DObj h; int fd; char* path; int dbk; void* db; } DHandle;
-typedef struct DTask { DObj h; V val; } DTask;
-typedef struct DChan { DObj h; DList* q; int64_t head; } DChan;
+typedef struct DHandle { DObj h; int fd; char* path; int dbk; void* db; void* mu; } DHandle;
+/* state 0 queued, 1 running, 2 done; run computes the value (a closure call, a par_map share, a connection) */
+typedef struct DTask { DObj h; V (*run)(struct DTask*); V fn; V val; int state; int fd; void* aux; struct DTask *prev, *next; } DTask;
+typedef struct DChan { DObj h; void* core; int role; } DChan;  /* role 0 Sender, 1 Receiver */
 typedef struct DBuf { char* p; int64_t len, cap; } DBuf;
 /* Runtime description of a concrete type, for reified generics (`json.decode[T]`).
    k: a K_* kind. num: K_INT 0 Int 1 I32 2 U8 3 U32 4 U64; K_FLOAT 0 Float 1 F32.
@@ -33,8 +36,8 @@ typedef struct DBuf { char* p; int64_t len, cap; } DBuf;
 typedef struct DTy { int32_t k, num; int64_t n; const struct DTy* const* a; DType* t; const struct DTy* const* const* vf; } DTy;
 typedef struct DTest { const char* name; V (*fn)(void); int is_example; const char* file; int line; int effects; } DTest;
 
-extern const char* d_loc_file;
-extern int d_loc_line;
+extern _Thread_local const char* d_loc_file;
+extern _Thread_local int d_loc_line;
 #define D_AT(f, l) (d_loc_file = (f), d_loc_line = (l))
 #define D_UNIT ((V){.k = K_UNIT, .i = 0})
 
@@ -54,8 +57,35 @@ uint64_t d_hash(V v);
 static inline V d_int(int64_t i) { V v; v.k = K_INT; v.i = i; return v; }
 static inline V d_float(double f) { V v; v.k = K_FLOAT; v.f = f; return v; }
 static inline V d_bool(int b) { V v; v.k = K_BOOL; v.i = b != 0; return v; }
-static inline V d_retain(V v) { if (v.k >= K_STR && v.o->rc > 0) v.o->rc++; return v; }
-static inline void d_release(V v) { if (v.k >= K_STR && v.o->rc > 0 && --v.o->rc == 0) d_free(v); }
+static inline V d_retain(V v) {
+  if (v.k >= K_STR) {
+    int64_t r = __atomic_load_n(&v.o->rc, __ATOMIC_RELAXED);
+    if (r > 0) v.o->rc = r + 1;
+    else if (r < 0) __atomic_fetch_sub(&v.o->rc, 1, __ATOMIC_RELAXED);
+  }
+  return v;
+}
+static inline void d_release(V v) {
+  if (v.k >= K_STR) {
+    int64_t r = __atomic_load_n(&v.o->rc, __ATOMIC_RELAXED);
+    if (r > 1) v.o->rc = r - 1;
+    else if (r == 1) d_free(v);
+    else if (r < 0 && __atomic_add_fetch(&v.o->rc, 1, __ATOMIC_ACQ_REL) == 0) d_free(v);
+  }
+}
+/* the caller holds the only reference, so it may mutate in place (a shared one becomes local again) */
+static inline int d_unique(DObj* o) {
+  int64_t r = __atomic_load_n(&o->rc, __ATOMIC_ACQUIRE);
+  if (r == 1) return 1;
+  if (r == -1) { o->rc = 1; return 1; }
+  return 0;
+}
+void d_share(V v);
+V d_spawn(V fn);
+void d_block_enter(void);
+void d_block_exit(void);
+void d_const_lock(void);
+void d_const_unlock(void);
 
 static inline V d_add(V a, V b) {
   if (a.k == K_INT) { int64_t r; if (__builtin_add_overflow(a.i, b.i, &r)) d_panic_c("integer overflow in `+`"); return d_int(r); }
@@ -138,7 +168,6 @@ V d_none(void);
 V d_ok(V v);
 V d_err(V e);
 V d_to_error(V e);
-V d_task(V v);
 void d_immortal(V v);
 
 _Noreturn void d_contract_fail(const char* kind, const char* fn, const char* src);

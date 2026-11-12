@@ -16,7 +16,7 @@ fn read(path: &str) -> String {
 
 #[test]
 fn golden_programs() {
-    for (name, code) in [("values", 0), ("closures", 0), ("control", 0), ("errors", 1), ("json", 0), ("regex", 0), ("html", 0), ("db", 0)] {
+    for (name, code) in [("values", 0), ("closures", 0), ("control", 0), ("errors", 1), ("json", 0), ("regex", 0), ("html", 0), ("db", 0), ("tasks", 0)] {
         let (out, err, c) = drift(&["run", &format!("tests/programs/{}.dr", name)]);
         assert_eq!(out, read(&format!("tests/programs/{}.out", name)), "{}: stderr:\n{}", name, err);
         assert_eq!(c, code, "{}: {}", name, err);
@@ -132,11 +132,29 @@ fn http_server_and_client() {
         std::net::TcpStream::connect(&addr).is_ok()
     });
     let (out, err, c) = if up { drift(&["run", "tests/programs/http_client.dr", &port]) } else { (String::new(), "server did not start".into(), -1) };
+    let (pout, perr, pc) = if up { drift(&["run", "tests/programs/http_parallel.dr", &port]) } else { (String::new(), String::new(), -1) };
     server.kill().ok();
     server.wait().ok();
     std::fs::remove_dir_all(dir).ok();
     assert_eq!(c, 0, "{}", err);
     assert_eq!(out, read("tests/programs/http_client.out").replace("8099", &port), "{}", err);
+    assert_eq!(pc, 0, "{}", perr);
+    assert_eq!(pout, "[\"slow 1\", \"slow 2\", \"slow 3\", \"slow 4\", \"slow 5\", \"slow 6\"]\nconcurrent: true\n", "{}", perr);
+}
+
+#[test]
+fn deadlock_is_reported() {
+    let (out, err, c) = drift(&["run", "tests/programs/deadlock.dr"]);
+    assert_eq!(c, 101, "{}{}", out, err);
+    assert!(err.contains("deadlock: every task is waiting (this one on `recv`)"), "{}", err);
+    assert!(err.contains("tx.close()"), "{}", err);
+}
+
+#[test]
+fn tasks_give_the_same_output_on_one_thread() {
+    let (out, err, c) = drift_env(&["run", "tests/programs/tasks.dr"], &[("DRIFT_THREADS", "1")]);
+    assert_eq!(c, 0, "{}", err);
+    assert_eq!(out, read("tests/programs/tasks.out"));
 }
 
 fn drift_env(args: &[&str], env: &[(&str, &str)]) -> (String, String, i32) {

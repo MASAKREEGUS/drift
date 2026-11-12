@@ -156,15 +156,17 @@ pub enum AppError {
 `main` returning `Err(e)` prints `error: ...` and exits with status 1. A panic prints `panic at file:line: message` and exits with status 101.
 
 ## Concurrency
-No async/await, no function coloring. Tasks are lightweight (M:N scheduler, one OS thread per core).
+No async/await, no function coloring. Tasks run in parallel on a thread pool (one running thread per core; a task blocked on network, db, sleep, `join` or a channel frees its core).
 ```
-let t = spawn fetch(url)                       // requires `uses spawn` + fetch's effects
+let t = spawn fetch(url)                       // requires `uses spawn` + fetch's effects; `spawn` takes a call
 let body = t.join()                            // the value fetch returned
-let pages = urls.par_map(|u| fetch(u))         // all finish before the next line (structured)
-let (tx, rx) = channel[Int](16)
+let pages = urls.par_map(|u| fetch(u))         // in order; all finish before the next line
+let (tx, rx) = channel[Int](16)                // capacity 0: send waits for the receiver
 tx.send(1)
-let next = rx.recv()                           // Option[Int]; None once all senders are gone
+tx.close()                                     // the producer closes when done
+let next = rx.recv()                           // Option[Int]; None once closed and drained
 ```
+Values are immutable, so tasks share them safely; the call after `spawn` runs in the task with the values it uses captured at that moment. A program where every task waits forever panics with `deadlock: ...` (usually a sender that was never closed). `http.serve` handles each connection in its own task.
 
 ## Modules and packages
 ```

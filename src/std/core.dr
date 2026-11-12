@@ -184,3 +184,5 @@ pub fn and_then[T, E, U](self: Result[T, E], f: fn(T) -> Result[U, E]) -> Result
 pub fn join[T](self: Task[T]) -> T uses spawn { todo }
 pub fn send[T](self: Sender[T], item: T) -> () uses spawn { todo }
 pub fn recv[T](self: Receiver[T]) -> Option[T] uses spawn { todo }
+/// No more items: `recv` returns None once the buffer is drained. Sending after `close` panics.
+pub fn close[T](self: Sender[T]) -> () uses spawn { todo }

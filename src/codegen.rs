@@ -543,7 +543,7 @@ impl<'p> Gen<'p> {
         self.emit(&format!("ret = {};", v));
         self.finish(&format!("static V c_{}_init(void)", c));
         self.funcs.push_str(&format!(
-            "static V c_{c}_v;\nstatic int c_{c}_s;\nstatic V c_{c}(void) {{\n  if (!c_{c}_s) {{ c_{c}_v = c_{c}_init(); d_immortal(c_{c}_v); c_{c}_s = 1; }}\n  return c_{c}_v;\n}}\n\n",
+            "static V c_{c}_v;\nstatic int c_{c}_s;\nstatic V c_{c}(void) {{\n  if (!__atomic_load_n(&c_{c}_s, __ATOMIC_ACQUIRE)) {{\n    d_const_lock();\n    if (!c_{c}_s) {{ c_{c}_v = c_{c}_init(); d_immortal(c_{c}_v); __atomic_store_n(&c_{c}_s, 1, __ATOMIC_RELEASE); }}\n    d_const_unlock();\n  }}\n  return c_{c}_v;\n}}\n\n",
             c = c
         ));
         self.protos.push_str(&format!("static V c_{}(void);\n", c));
@@ -1023,8 +1023,25 @@ impl<'p> Gen<'p> {
             }
             ExprKind::Block(b) => self.block(b, true),
             ExprKind::Spawn(x) => {
+                // the expression runs in the new task, as the body of a closure without parameters
+                let id = self.fresh("task_");
+                let m = self.module();
+                self.ctxs.push(Ctx::new(m, true));
                 let v = self.expr(x);
-                self.tmp(format!("d_task({})", v))
+                self.emit(&format!("ret = {};", v));
+                let caps = self.ctxs.last().unwrap().captures.clone();
+                self.finish(&format!("static V {}(DFn* fo, V* args)", id));
+                let mut env = Vec::new();
+                for name in &caps {
+                    let l = self.lookup(name).expect("captured name resolves in the enclosing function");
+                    env.push(self.read(&l));
+                }
+                let f = if env.is_empty() {
+                    format!("d_fn_new({}, 0, 0, NULL)", id)
+                } else {
+                    format!("d_fn_new({}, 0, {}, (V[]){{{}}})", id, env.len(), env.join(", "))
+                };
+                self.tmp(format!("d_spawn({})", f))
             }
             ExprKind::Return(v) => {
                 let r = match v {

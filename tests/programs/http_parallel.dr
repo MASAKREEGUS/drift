@@ -1,0 +1,17 @@
+// 6 requests that each take 400 ms on the server: concurrent connections finish in about one
+pub fn main() -> Result[(), Error] uses io, env, net, spawn, time {
+  let port = env.args().get(1).unwrap_or("8099")
+  let start = time.now_ms()
+  let bodies = [1, 2, 3, 4, 5, 6].par_map(|n| fetch("http://127.0.0.1:{port}/slow?n={n}"))
+  let took = time.now_ms() - start
+  io.println("{bodies}")
+  io.println("concurrent: {took < 1600}")
+  Ok(())
+}
+
+fn fetch(url: Str) -> Str uses net {
+  match http.get(url) {
+    Ok(r) => r.text().unwrap_or("bad text")
+    Err(e) => "error {e.message}"
+  }
+}

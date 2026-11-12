@@ -89,7 +89,7 @@ decodes as `None`, unknown keys are ignored); unit variants as `"Name"`, others 
 HTTP: HTTP/1.1 on plain sockets (connect 15 s, I/O 30 s timeouts, chunked, up to 10 redirects, 256 MiB body cap).
 TLS uses the system OpenSSL 3 through `dlopen` on the first https URL, with peer and hostname verification and
 TLS >= 1.2, so `drift build` output still has no link-time dependency. `http.serve` handles one request per
-connection, sequentially until phase 5 (10 s I/O timeout, 64 KiB headers, 16 MiB bodies, UTF-8 checked).
+connection, each connection in its own task (10 s I/O timeout, 64 KiB headers, 16 MiB bodies, UTF-8 checked).
 DB: SQLite (`libsqlite3.so.0`) and PostgreSQL (`libpq.so.5`) are loaded with `dlopen` on the first `db.open`,
 so binaries keep no link-time dependency. One statement per `exec`/`query` (SQLite rejects trailing ones), `$n`
 placeholders bound by number on both (SQLite checks every `$n` <= the parameter count and that all are used).
@@ -118,7 +118,21 @@ ABIs are killed, x32 gets ENOSYS) and returns EACCES for `socket` without `net`/
 namespaces, keyrings and modules. Sanitizer builds keep ptrace, plain clone and /proc for LeakSanitizer.
 Kernels without Landlock or seccomp run unrestricted unless `DRIFT_SANDBOX=strict`. `db` currently opens both
 `fs` and `net` (sqlite files, postgres sockets).
-Known limits: `spawn`/`par_map`/channels run sequentially until phase 5; a value leaked on an early `?` exit is reclaimed at process end.
+Concurrency (phase 5): refcounts are thread-local by default (rc > 0, plain increments) and become shared
+when a value crosses to another task: `d_share` flips rc negative for the value and everything it reaches
+(iteratively, stopping at shared or immortal objects) on spawn captures, channel sends, task results,
+par_map inputs/outputs and constants. Shared objects count atomically; a COW check that finds rc == -1 owns
+the only reference and makes the object local again before mutating it, which keeps the invariant "a shared
+object only reaches shared objects". Single-threaded cost: one extra branch per retain/release (about 3% on a
+refcount-heavy benchmark). Scheduler: a FIFO of tasks, at most `ncpu` threads running Drift code (main
+included); network, db, sleep and stdin calls are bracketed by `d_block_enter/exit` and waits on `join` or a
+channel release their slot, so a worker is woken or started (<= 256 threads, 8 MiB stacks). `join` of a task
+that has not started runs it inline. par_map: up to 63 helper tasks claim index chunks from an atomic counter
+while the caller works too. Channels: mutex + condvar ring buffer; capacity 0 is a rendezvous; `close` ends
+the stream; dropping the receiver makes sends no-ops. Deadlock: a wait that times out (1 s) with every busy
+thread waiting, an empty queue and no progress panics. Verified with ThreadSanitizer (0 races over 40 runs of
+`tests/programs/tasks.dr`), ASan/LSan, and the same output with `DRIFT_THREADS=1`.
+Known limits: a value leaked on an early `?` exit is reclaimed at process end; a panic in any task ends the program.
 
 ## 8. Roadmap
 | Phase | Deliverable |
@@ -128,6 +142,6 @@ Known limits: `spawn`/`par_map`/channels run sequentially until phase 5; a value
 | 2 | Name resolution, types with local inference, effects, JSON diagnostics with fixes, `todo` holes |
 | 3 | ✅ C backend + runtime (refcount, copy-on-write Str/Bytes/List/Map/Set), `drift run/build/test`, contracts, isolated tests |
 | 4 | std: io, fs, json, str, time, env, proc, http client, re, html, db (sqlite/postgres); sandbox from `uses` |
-| 5 | Tasks + `spawn`/`par_map`/channels runtime; `drift mcp`; eval runs vs Python/Rust |
+| 5 | ✅ Tasks + `spawn`/`par_map`/channels runtime (parallel, shared refcounts); next: `drift mcp`; eval runs vs Python/Rust |
 | 6 | Real workload: port an El Dato component and run it on the HP |
 | 7 | Self-hosting; own backend (connects to the compiler project) |
