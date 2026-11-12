@@ -44,16 +44,65 @@ pub fn check(files: &[SourceFile], asts: Vec<Module>) -> Vec<(usize, Diag)> {
     out
 }
 
+/// What the checker learned about an expression or pattern, for the code generator.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Note {
+    Fn(usize),
+    Const(usize),
+    Variant(usize, usize),
+    Struct(usize),
+    Field(usize),
+    Method(usize),
+    FieldFn(usize),
+    StructLit(usize, Option<usize>),
+    With(usize),
+    TrySame,
+    TryToError,
+    TryWrap(usize, usize),
+}
+
+/// Note keys: (module, span.lo, span.hi, kind) with kind b'p' path/field, b'c' call, b't' `?`, b's' literal, b'P' pattern.
+pub(crate) type NoteKey = (usize, u32, u32, u8);
+
+/// A fully checked program: everything the back end needs.
+pub struct Program {
+    pub(crate) files: Vec<(String, String, bool)>,
+    pub(crate) asts: Vec<Module>,
+    pub(crate) mods: Vec<ModInfo>,
+    pub(crate) defs: Vec<TypeDef>,
+    pub(crate) fns: Vec<FnInfo>,
+    pub(crate) consts: Vec<ConstInfo>,
+    pub(crate) notes: HashMap<NoteKey, Note>,
+}
+
+/// Type-check and keep the tables for code generation.
+pub fn check_program(files: &[SourceFile], asts: Vec<Module>) -> (Vec<(usize, Diag)>, Program) {
+    let mut c = Checker::new(files, asts);
+    c.run();
+    let mut out = std::mem::take(&mut c.diags);
+    out.sort_by_key(|(f, d)| (*f, d.span.lo, d.span.hi));
+    let prog = Program {
+        files: files.iter().map(|f| (f.name.clone(), f.src.clone(), f.is_std)).collect(),
+        asts: std::mem::take(&mut c.asts),
+        mods: std::mem::take(&mut c.mods),
+        defs: std::mem::take(&mut c.defs),
+        fns: std::mem::take(&mut c.fns),
+        consts: std::mem::take(&mut c.consts),
+        notes: std::mem::take(&mut c.notes),
+    };
+    (out, prog)
+}
+
 // ---------------------------------------------------------------- types
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Owner {
+pub(crate) enum Owner {
     Def(usize),
     Fn(usize),
 }
 
 #[derive(Clone, Debug, PartialEq)]
-enum Ty {
+pub(crate) enum Ty {
     Named(usize, Vec<Ty>),
     Tuple(Vec<Ty>),
     /// params, return, effects, effect-polymorphic (declared without `uses`)
@@ -79,14 +128,14 @@ fn subst(t: &Ty, owner: Owner, args: &[Ty]) -> Ty {
 }
 
 #[derive(Clone, Debug)]
-enum VFields {
+pub(crate) enum VFields {
     Unit,
     Tuple(Vec<Ty>),
     Named(Vec<(String, Ty)>),
 }
 
 #[derive(Clone, Debug)]
-enum DefKind {
+pub(crate) enum DefKind {
     Struct(Vec<(String, Ty)>),
     Enum(Vec<(String, VFields)>),
     Alias(Ty),
@@ -95,45 +144,45 @@ enum DefKind {
 }
 
 #[derive(Clone, Debug)]
-struct TypeDef {
-    name: String,
-    module: usize,
-    generics: Vec<String>,
-    kind: DefKind,
-    public: bool,
+pub(crate) struct TypeDef {
+    pub(crate) name: String,
+    pub(crate) module: usize,
+    pub(crate) generics: Vec<String>,
+    pub(crate) kind: DefKind,
+    pub(crate) public: bool,
 }
 
 #[derive(Clone, Debug)]
-struct Param {
-    name: String,
-    ty: Ty,
-    mutable: bool,
+pub(crate) struct Param {
+    pub(crate) name: String,
+    pub(crate) ty: Ty,
+    pub(crate) mutable: bool,
 }
 
 #[derive(Clone, Debug)]
-struct FnInfo {
-    name: String,
-    module: usize,
-    item: usize,
-    generics: Vec<String>,
-    params: Vec<Param>,
-    ret: Ty,
-    effects: u16,
-    is_method: bool,
-    owner: Option<usize>,
-    public: bool,
+pub(crate) struct FnInfo {
+    pub(crate) name: String,
+    pub(crate) module: usize,
+    pub(crate) item: usize,
+    pub(crate) generics: Vec<String>,
+    pub(crate) params: Vec<Param>,
+    pub(crate) ret: Ty,
+    pub(crate) effects: u16,
+    pub(crate) is_method: bool,
+    pub(crate) owner: Option<usize>,
+    pub(crate) public: bool,
 }
 
 #[derive(Clone, Debug)]
-struct ConstInfo {
-    module: usize,
-    item: usize,
-    ty: Ty,
-    public: bool,
+pub(crate) struct ConstInfo {
+    pub(crate) module: usize,
+    pub(crate) item: usize,
+    pub(crate) ty: Ty,
+    pub(crate) public: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Decl {
+pub(crate) enum Decl {
     Type(usize),
     Fn(usize),
     Const(usize),
@@ -141,35 +190,35 @@ enum Decl {
     Variant(usize, usize),
 }
 
-struct ModInfo {
-    path: String,
-    file: usize,
-    is_std: bool,
-    names: HashMap<String, Decl>,
-    imports: HashMap<String, Decl>,
+pub(crate) struct ModInfo {
+    pub(crate) path: String,
+    pub(crate) file: usize,
+    pub(crate) is_std: bool,
+    pub(crate) names: HashMap<String, Decl>,
+    pub(crate) imports: HashMap<String, Decl>,
 }
 
 #[derive(Default, Clone, Copy)]
-struct Core {
-    int: usize,
-    i32: usize,
-    u8: usize,
-    u32: usize,
-    u64: usize,
-    float: usize,
-    f32: usize,
-    bool: usize,
-    str: usize,
-    bytes: usize,
-    never: usize,
-    list: usize,
-    map: usize,
-    set: usize,
-    range: usize,
-    task: usize,
-    option: usize,
-    result: usize,
-    error: usize,
+pub(crate) struct Core {
+    pub(crate) int: usize,
+    pub(crate) i32: usize,
+    pub(crate) u8: usize,
+    pub(crate) u32: usize,
+    pub(crate) u64: usize,
+    pub(crate) float: usize,
+    pub(crate) f32: usize,
+    pub(crate) bool: usize,
+    pub(crate) str: usize,
+    pub(crate) bytes: usize,
+    pub(crate) never: usize,
+    pub(crate) list: usize,
+    pub(crate) map: usize,
+    pub(crate) set: usize,
+    pub(crate) range: usize,
+    pub(crate) task: usize,
+    pub(crate) option: usize,
+    pub(crate) result: usize,
+    pub(crate) error: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -439,6 +488,7 @@ struct Checker<'f> {
     gens: Vec<(String, Ty)>,
     holes: Vec<(Span, Ty, Vec<(String, Ty)>)>,
     infer_lets: Vec<(String, Span, Ty)>,
+    notes: HashMap<NoteKey, Note>,
 }
 
 impl<'f> Checker<'f> {
@@ -476,7 +526,12 @@ impl<'f> Checker<'f> {
             gens: Vec::new(),
             holes: Vec::new(),
             infer_lets: Vec::new(),
+            notes: HashMap::new(),
         }
+    }
+
+    fn note(&mut self, span: Span, kind: u8, n: Note) {
+        self.notes.insert((self.cur, span.lo, span.hi, kind), n);
     }
 
     fn emit(&mut self, d: Diag) {
@@ -1008,6 +1063,11 @@ impl<'f> Checker<'f> {
         let a = self.resolve(a);
         let b = self.resolve(b);
         match (&a, &b) {
+            // an unknown type absorbs inference variables so one mistake reports once
+            (Ty::Var(x), Ty::Err) | (Ty::Err, Ty::Var(x)) => {
+                self.vars[*x] = Some(Ty::Err);
+                true
+            }
             (Ty::Err, _) | (_, Ty::Err) | (Ty::Never, _) | (_, Ty::Never) => true,
             (Ty::Var(x), Ty::Var(y)) if x == y => true,
             (Ty::Var(x), _) => {
@@ -1710,6 +1770,10 @@ impl<'f> Checker<'f> {
                         }
                     },
                 };
+                self.note(p.span, b'P', match vi {
+                    Some(i) => Note::Variant(d, i),
+                    None => Note::Struct(d),
+                });
                 let vname = path.last().unwrap().name.clone();
                 match (&p.kind, fields) {
                     (PatKind::Unit { .. }, VFields::Unit) => P::Ctor(ctor, vec![]),
@@ -2055,6 +2119,7 @@ impl<'f> Checker<'f> {
                         if k + 1 != segs.len() {
                             return None;
                         }
+                        self.note(e.span, b'p', Note::Fn(f));
                         return Some(PathRes::Fn(f));
                     } else {
                         self.unknown_variant(d, seg);
@@ -2064,6 +2129,12 @@ impl<'f> Checker<'f> {
                 // a value followed by more segments: field access, handled by the caller
                 _ => return None,
             };
+        }
+        match decl {
+            Decl::Fn(f) => self.note(e.span, b'p', Note::Fn(f)),
+            Decl::Const(c) => self.note(e.span, b'p', Note::Const(c)),
+            Decl::Variant(d, i) => self.note(e.span, b'p', Note::Variant(d, i)),
+            _ => {}
         }
         Some(match decl {
             Decl::Type(d) => PathRes::Type(d),
@@ -2223,6 +2294,7 @@ impl<'f> Checker<'f> {
                     self.emit(Diag::error("E0131", base.span, format!("`with` updates a struct; `{}` is not one", shown)));
                     return bt;
                 };
+                self.note(e.span, b's', Note::With(d));
                 for (n, v) in fields {
                     match fs.iter().find(|(f, _)| *f == n.name) {
                         Some((_, ft)) => {
@@ -2441,8 +2513,9 @@ impl<'f> Checker<'f> {
         };
         let args = self.args_of(&rt);
         if let Some(fs) = self.struct_fields(d, &args) {
-            if let Some((_, t)) = fs.iter().find(|(f, _)| *f == name.name) {
-                return t.clone();
+            if let Some(i) = fs.iter().position(|(f, _)| *f == name.name) {
+                self.note(e.span, b'p', Note::Field(i));
+                return fs[i].1.clone();
             }
             if self.methods.contains_key(&(d, name.name.clone())) {
                 let mut diag = Diag::error("E0313", name.span, format!("`{}` is a method; call it", name.name));
@@ -2544,6 +2617,7 @@ impl<'f> Checker<'f> {
                     .with_fix(Span::empty_at(at), text),
             );
         }
+        self.note(e.span, b's', Note::StructLit(d, vi));
         Ty::Named(d, args)
     }
 
@@ -2619,6 +2693,7 @@ impl<'f> Checker<'f> {
             };
         }
         let qspan = Span::new(e.span.hi as usize - 1, e.span.hi as usize);
+        self.note(e.span, b't', Note::TrySame);
         match self.head(&rt) {
             Some(h) if h == c.result => {
                 let a = self.args_of(&rt);
@@ -2630,7 +2705,11 @@ impl<'f> Checker<'f> {
                     }
                     _ if self.head(&rr) == Some(c.result) => {
                         let target = self.args_of(&rr)[1].clone();
-                        if !self.error_converts(&err, &target) {
+                        let conv = self.conversion(&err, &target);
+                        if let Some(cv) = &conv {
+                            self.note(e.span, b't', cv.clone());
+                        }
+                        if conv.is_none() {
                             let (fe, te) = (self.show(&err), self.show(&target));
                             self.emit(
                                 Diag::error("E0402", qspan, format!("`?` cannot turn `{}` into `{}`; add a variant `{}({})` to the error enum, or use `.map_err(...)`", fe, te, self.defs[self.head(&err).unwrap_or(c.error)].name, fe))
@@ -2675,6 +2754,30 @@ impl<'f> Checker<'f> {
         }
     }
 
+    /// How `?` turns an error of type `from` into `to`, if it can.
+    fn conversion(&mut self, from: &Ty, to: &Ty) -> Option<Note> {
+        if self.probe(from, to) {
+            self.unify(from, to);
+            return Some(Note::TrySame);
+        }
+        let d = self.head(to)?;
+        if d == self.core.error {
+            return Some(Note::TryToError);
+        }
+        let args = self.args_of(to);
+        let vs = self.variants(d, &args)?;
+        let mut hits = Vec::new();
+        for (i, (_, f)) in vs.iter().enumerate() {
+            if let VFields::Tuple(ts) = f {
+                if ts.len() == 1 && self.probe(from, &ts[0]) {
+                    hits.push(i);
+                }
+            }
+        }
+        if hits.len() == 1 { Some(Note::TryWrap(d, hits[0])) } else { None }
+    }
+
+    #[allow(dead_code)]
     fn error_converts(&mut self, from: &Ty, to: &Ty) -> bool {
         if self.probe(from, to) {
             self.unify(from, to);
@@ -2933,13 +3036,15 @@ impl<'f> Checker<'f> {
             return Ty::Err;
         };
         if let Some(fid) = self.methods.get(&(d, name.name.clone())).copied() {
+            self.note(e.span, b'c', Note::Method(fid));
             return self.call_fn(fid, Some((base, rt.clone())), args, e, None, exp);
         }
         // a struct field holding a function
         let targs = self.args_of(&rt);
         if let Some(fs) = self.struct_fields(d, &targs) {
-            if let Some((_, ft)) = fs.iter().find(|(f, _)| *f == name.name) {
-                let ft = ft.clone();
+            if let Some(i) = fs.iter().position(|(f, _)| *f == name.name) {
+                let ft = fs[i].1.clone();
+                self.note(e.span, b'c', Note::FieldFn(i));
                 return self.call_value(e, &ft, args);
             }
         }

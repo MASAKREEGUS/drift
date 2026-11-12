@@ -1,0 +1,12 @@
+fn grow(n: Int) -> Int {
+  n * 1000000000
+}
+
+pub fn main() -> Result[(), Error] uses io {
+  var x = 1
+  for _ in 0..5 {
+    x = grow(x)
+  }
+  io.println("{x}")
+  Ok(())
+}

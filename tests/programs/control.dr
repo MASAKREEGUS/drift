@@ -1,0 +1,98 @@
+enum Tree {
+  Leaf
+  Node { left: Tree, value: Int, right: Tree }
+}
+
+fn insert(self: Tree, v: Int) -> Tree {
+  match self {
+    Tree.Leaf => Tree.Node { left: Tree.Leaf, value: v, right: Tree.Leaf }
+    Tree.Node { left, value, right } if v < value => Tree.Node {
+      left: left.insert(v),
+      value,
+      right,
+    }
+    Tree.Node { left, value, right } => Tree.Node { left, value, right: right.insert(v) }
+  }
+}
+
+fn to_list(self: Tree) -> List[Int] {
+  match self {
+    Tree.Leaf => []
+    Tree.Node { left, value, right } => left.to_list() + [value] + right.to_list()
+  }
+}
+
+fn describe(xs: List[Int]) -> Str {
+  match xs {
+    [] => "empty"
+    [x] => "one: {x}"
+    [a, b] if a == b => "pair of {a}"
+    [a, ..rest] => "{a} then {rest.len()} more"
+  }
+}
+
+fn classify(s: Str) -> Str {
+  match s {
+    "a" | "e" | "i" | "o" | "u" => "vowel"
+    _ => "other"
+  }
+}
+
+fn fib(n: Int) -> Int {
+  if n < 2 {
+    n
+  } else {
+    fib(n - 1) + fib(n - 2)
+  }
+}
+
+fn collatz(start: Int) -> Int {
+  var n = start
+  var steps = 0
+  while n != 1 {
+    n = if n % 2 == 0 {
+      n / 2
+    } else {
+      3 * n + 1
+    }
+    steps += 1
+  }
+  steps
+}
+
+pub fn main() -> Result[(), Error] uses io {
+  var t = Tree.Leaf
+  for v in [5, 2, 8, 1, 9, 3] {
+    t = t.insert(v)
+  }
+  io.println("{t.to_list()}")
+  io.println("{describe([])} | {describe([4])} | {describe([2, 2])} | {describe([1, 2, 3])}")
+  let vowel = classify("a")
+  let other = classify("z")
+  io.println("{vowel} {other}")
+  var found = -1
+  var i = 0
+  loop {
+    i += 1
+    if i % 7 != 0 {
+      continue
+    }
+    if i > 30 {
+      found = i
+      break
+    }
+  }
+  io.println("{found} {fib(25)} {collatz(27)}")
+  let s = "héllo wörld"
+  let rev = s.chars().reversed().join("")
+  let at = s.find("w")
+  let up = s.replace("l", "L")
+  io.println("{s.len()} {rev} {at} {s.slice(1, 4)} {up}")
+  let set = Set.of([3, 1, 3, 2])
+  var squares: List[Int] = []
+  for k in 1..=4 {
+    squares.push(k * k)
+  }
+  io.println("{set.len()} {set.contains(2)} {set.to_list()} {squares}")
+  Ok(())
+}

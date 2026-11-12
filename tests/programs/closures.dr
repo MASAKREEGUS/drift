@@ -1,0 +1,32 @@
+fn adder(n: Int) -> fn(Int) -> Int {
+  |x| x + n
+}
+
+fn twice(f: fn(Int) -> Int, x: Int) -> Int {
+  f(f(x))
+}
+
+pub fn main() -> Result[(), Error] uses io {
+  let add3 = adder(3)
+  let xs = [5, 3, 8, 1]
+  io.println("{xs.map(add3)} {twice(add3, 10)} {twice(|x| x * x, 3)}")
+  io.println("{xs.sorted()} {xs.sorted_by(|x| -x)} {xs.fold(0, |acc, x| acc + x)}")
+  let words = ["apple", "avocado", "banana", "blueberry", "cherry"]
+  let sep = ", "
+  for (k, ws) in words.group_by(|w| w.slice(0, 1)) {
+    io.println("{k}: {ws.join(sep)}")
+  }
+  for (i, w) in words.enumerate().filter(|(i, _)| i % 2 == 0) {
+    io.println("{i} {w.to_upper()}")
+  }
+  let pairs = xs.zip(words)
+  io.println("{pairs.take(2)} {xs.any(|x| x > 7)} {xs.all(|x| x > 0)} {xs.count(|x| x > 2)}")
+  let base = 100
+  let adders = [1, 2, 3].map(|k| |x| x * k + base)
+  io.println("{adders.map(|f| f(2))}")
+  io.println(
+    "{[1, 2, 2, 3, 3, 3].dedup()} {[[1, 2], [3]].flat_map(|l| l)} {[1, 2, 3, 4, 5].chunks(2)}",
+  )
+  io.println("{xs.min()} {xs.max()} {xs.find(|x| x > 4)} {[1.5, 2.5].sum()} {xs.index_of(8)}")
+  Ok(())
+}

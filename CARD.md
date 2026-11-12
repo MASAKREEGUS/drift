@@ -152,6 +152,7 @@ pub enum AppError {
 ```
 `?` converts automatically when the function's error enum has exactly one single-field variant wrapping the source error.
 `Error` (`{ message: Str }`, built with `error("text {x}")`) is the catch-all for scripts: `?` converts any error into `Error` using its `show`.
+`main` returning `Err(e)` prints `error: ...` and exits with status 1. A panic prints `panic at file:line: message` and exits with status 101.
 
 ## Concurrency
 No async/await, no function coloring. Tasks are lightweight (M:N scheduler, one OS thread per core).
@@ -179,9 +180,9 @@ Every std module is always in scope (`io.println`, `fs.read_str`, `http.get`, `j
 |---|---|
 | `drift check [--json]` | all diagnostics at once, each with `code`, `span`, `message`, `expected`, `found`, `fix` (machine-applicable edit) |
 | `drift check --fix` | apply every certain fix (syntax, layout, …) in place, then report what is left |
-| `drift run <file>` | compile and run |
-| `drift test` | run every `examples` and `test` block |
-| `drift build [--release]` | native binary through C (x86-64, ARM64, RISC-V; no runtime dependency) |
+| `drift run <file\|dir> [args...]` | check, compile through C and run `main`; `args` reach `env.args()` |
+| `drift test [--json] <file\|dir>` | run every `examples` and `test` block, each isolated; a `todo` fails only the test that reaches it |
+| `drift build <file\|dir> [-o out]` | native executable through C (`gcc -O2`; no runtime dependency) |
 | `drift fmt [--check]` | canonical layout (width 100, 2 spaces); comments and single blank lines are kept |
 | `drift outline <module>` | compact signatures, types and effects of a module |
 | `drift explain <code>` | full explanation of a diagnostic |

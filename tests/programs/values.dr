@@ -1,0 +1,27 @@
+struct Point { x: Float, y: Float }
+
+pub fn main() -> Result[(), Error] uses io {
+  var a = [1, 2, 3]
+  let b = a
+  a.push(4)
+  io.println("{a} {b}")
+  var m = {"x": 1}
+  let m2 = m
+  m["y"] = 2
+  m["x"] += 10
+  io.println("{m} {m2}")
+  var p = Point { x: 1.0, y: 2.0 }
+  let q = p
+  p.x = 5.0
+  io.println("{p} {q}")
+  var grid = [[0, 0], [0, 0]]
+  let before = grid
+  grid[1][0] = 7
+  io.println("{grid} {before}")
+  var s = ""
+  for i in 0..5 {
+    s += "{i}"
+  }
+  io.println(s)
+  Ok(())
+}

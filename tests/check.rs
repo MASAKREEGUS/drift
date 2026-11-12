@@ -96,6 +96,12 @@ fn transposed_letters_are_fixed() {
 }
 
 #[test]
+fn one_unknown_name_reports_once() {
+    let src = "fn f(lines: List[Str]) -> Int {\n  let xs = lines.map(|l| Ofer.parse(l)).filter(|o| o.is_some())\n  xs.len()\n}\n";
+    assert_eq!(errors(src), vec!["E0100"], "{:#?}", semantic(src));
+}
+
+#[test]
 fn far_typo_is_only_a_hint() {
     let d = semantic("fn f(total_price: Int) -> Int {\n  totl_prce + 1\n}\n");
     let e = d.iter().find(|d| d.code == "E0100").unwrap();

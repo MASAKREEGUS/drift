@@ -1,10 +1,16 @@
 //! Project-level pipeline shared by the CLI and the tests.
 
-use crate::check::{std_sources, SourceFile};
+use crate::check::{std_sources, Program, SourceFile};
 use crate::diag::{apply_edits, Diag, Edit};
 
 /// Diagnostics for every user file: syntax; then types/effects (if everything parses); then layout.
 pub fn analyze(user: &[SourceFile]) -> Vec<Vec<Diag>> {
+    analyze_program(user).0
+}
+
+/// Like `analyze`, also returning the checked program when every file parses.
+pub fn analyze_program(user: &[SourceFile]) -> (Vec<Vec<Diag>>, Option<Program>) {
+    let mut program = None;
     let mut per_file: Vec<Vec<Diag>> = Vec::new();
     let mut asts = Vec::new();
     let mut syntax_ok = true;
@@ -22,7 +28,9 @@ pub fn analyze(user: &[SourceFile]) -> Vec<Vec<Diag>> {
         let mut std_asts: Vec<_> = all.iter().map(|f| crate::parser::parse(&f.src).module).collect();
         std_asts.extend(asts);
         all.extend(user.iter().map(|f| SourceFile { name: f.name.clone(), src: f.src.clone(), module: f.module.clone(), is_std: false }));
-        for (file, d) in crate::check::check(&all, std_asts) {
+        let (diags, prog) = crate::check::check_program(&all, std_asts);
+        program = Some(prog);
+        for (file, d) in diags {
             if file >= n_std {
                 per_file[file - n_std].push(d);
             } else {
@@ -38,7 +46,47 @@ pub fn analyze(user: &[SourceFile]) -> Vec<Vec<Diag>> {
         }
         per_file[i].sort_by_key(|d| (d.span.lo, d.span.hi));
     }
-    per_file
+    (per_file, program)
+}
+
+/// Check and translate to C. `test` builds the test harness (holes allowed: they panic when reached);
+/// otherwise the program entry is the user's `main` and holes are rejected.
+pub fn compile(user: &[SourceFile], test: bool) -> Result<String, Vec<Vec<Diag>>> {
+    let (mut diags, program) = analyze_program(user);
+    // layout (F0001) is reported by `drift check` but never stops a program from running
+    let blocking = |d: &Diag| (d.is_error() && d.code != "F0001") || (!test && d.severity == crate::diag::Severity::Hole);
+    if diags.iter().flatten().any(blocking) {
+        return Err(diags);
+    }
+    let program = program.expect("program exists when there are no syntax errors");
+    if test {
+        return Ok(crate::codegen::generate(&program, &crate::codegen::Target::Test));
+    }
+    let mains: Vec<usize> = (0..program.fns.len())
+        .filter(|&f| {
+            let i = &program.fns[f];
+            i.name == "main" && !i.is_method && i.owner.is_none() && !program.mods[i.module].is_std
+        })
+        .collect();
+    let main = mains.iter().copied().find(|&f| program.mods[program.fns[f].module].path == "main").or(mains.first().copied());
+    let Some(main) = main else {
+        if diags.is_empty() {
+            diags.push(Vec::new());
+        }
+        diags[0].push(Diag::error(
+            "E0010",
+            crate::diag::Span::new(0, 0),
+            "no `main` function to run: add `pub fn main() -> Result[(), Error] uses io { ... }`",
+        ));
+        return Err(diags);
+    };
+    if !program.fns[main].params.is_empty() {
+        let m = program.fns[main].module;
+        let idx = user.iter().position(|f| f.module == program.mods[m].path).unwrap_or(0);
+        diags[idx].push(Diag::error("E0011", crate::diag::Span::new(0, 0), "`main` takes no parameters: read arguments with `env.args()`"));
+        return Err(diags);
+    }
+    Ok(crate::codegen::generate(&program, &crate::codegen::Target::Run { main }))
 }
 
 

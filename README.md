@@ -7,4 +7,4 @@ A compiled, statically typed programming language designed for AI agents.
 - `examples/` — corpus of Drift programs (parser/typechecker test suite).
 - `eval/` — tasks used to measure agent performance in Drift vs Python/Rust.
 
-Status: phases 0-2 done: parser, formatter, type/effect checker with certain fixes (`drift check --fix`), std signatures (`drift outline std`). Next: C backend (`drift run`, `drift test`).
+Status: phases 0-3 done: parser, formatter, type/effect checker with certain fixes (`drift check --fix`), C backend with a refcounted copy-on-write runtime (`drift run`, `drift build`, `drift test`). Next: std (http, json, html, db) and the effect sandbox.

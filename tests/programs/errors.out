@@ -1,0 +1,4 @@
+Ok(6)
+Err(AppError.Parse { line: 2 })
+io error on /no/such/file
+Some(40) None

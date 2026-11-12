@@ -1,0 +1,25 @@
+fn double(n: Int) -> Int {
+  n * 2
+}
+
+fn unfinished(n: Int) -> Int {
+  todo
+}
+
+examples double {
+  double(2) == 4
+  double(3) == 7
+}
+
+test "unfinished part panics" {
+  assert unfinished(1) == 1
+}
+
+test "assert shows both sides" {
+  let xs = [1, 2]
+  assert xs.len() == 3, "expected three"
+}
+
+test "passes" {
+  assert double(5) == 10
+}

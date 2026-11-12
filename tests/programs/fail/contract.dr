@@ -1,0 +1,12 @@
+fn percent(part: Int, whole: Int) -> Int
+  requires whole > 0
+  ensures result >= 0
+{
+  part * 100 / whole
+}
+
+pub fn main() -> Result[(), Error] uses io {
+  io.println("{percent(1, 4)}")
+  io.println("{percent(-5, 4)}")
+  Ok(())
+}

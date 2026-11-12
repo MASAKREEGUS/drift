@@ -65,13 +65,28 @@ For each task in `eval/TASKS.md`, the agent gets only `CARD.md` plus the task te
 Metrics: pass@1 (first attempt passes hidden tests), pass@3 with compiler feedback, iterations to green, tokens spent,
 runtime and peak memory of the result on the HP. A design change is kept only if it doesn't regress these.
 
-## 7. Roadmap
+## 7. Back end (phase 3)
+Typed AST → C11 → gcc. The checker leaves notes keyed by span (which function a method call resolves to,
+field indices, how `?` converts an error, which variant a pattern names); the generator needs nothing else.
+- Values are 16 bytes (`kind` + payload): Int/Float/Bool unboxed, everything else a refcounted object.
+  Generic code is not monomorphized; `==`, `<`, `hash`, `show` are structural and dispatch on the kind.
+- Ownership is uniform: every expression yields an owned value; locals are hoisted and released at the
+  function's single exit, so `return`, `?`, `break`, `continue` need no cleanup paths.
+- Mutation (`x.f = v`, `m[k] = v`, `var self` methods) goes through slots made unique first (copy-on-write);
+  `s += t` and `xs + ys` on a unique left side grow in place.
+- `drift test` forks one process per `examples`/`test` block and captures its stderr; holes panic only when reached.
+- The runtime object and program binaries are cached by content hash in `~/.cache/drift`.
+- Checked in CI-style runs with AddressSanitizer + UBSan + LeakSanitizer (`DRIFT_CFLAGS`).
+Known limits: `spawn`/`par_map`/channels run sequentially until phase 5; `http`, `html`, `json` natives arrive
+in phase 4 (calling them panics with a clear message); a value leaked on an early `?` exit is reclaimed at process end.
+
+## 8. Roadmap
 | Phase | Deliverable |
 |---|---|
 | 0 | CARD, DESIGN, example corpus, eval tasks |
 | 1 | Rust bootstrap: lexer, lossless parser, `drift fmt`, parse the whole corpus |
 | 2 | Name resolution, types with local inference, effects, JSON diagnostics with fixes, `todo` holes |
-| 3 | IR + C backend + runtime (refcount, Str, List, Map, Set), `drift run/build`; `examples`/contracts in `drift test` |
+| 3 | ✅ C backend + runtime (refcount, copy-on-write Str/Bytes/List/Map/Set), `drift run/build/test`, contracts, isolated tests |
 | 4 | std: io, fs, json, str, time, env, proc, http client, re, html, db (sqlite/postgres); sandbox from `uses` |
 | 5 | Tasks + `spawn`/`par_map`/channels runtime; `drift mcp`; eval runs vs Python/Rust |
 | 6 | Real workload: port an El Dato component and run it on the HP |

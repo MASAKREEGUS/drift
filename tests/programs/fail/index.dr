@@ -1,0 +1,6 @@
+pub fn main() -> Result[(), Error] uses io {
+  let xs = [1, 2, 3]
+  io.println("before")
+  io.println("{xs[5]}")
+  Ok(())
+}

@@ -1,0 +1,31 @@
+fn fib(n: Int) -> Int {
+  if n < 2 {
+    n
+  } else {
+    fib(n - 1) + fib(n - 2)
+  }
+}
+
+pub fn main() -> Result[(), Error] uses io, time {
+  let t0 = time.now_ms()
+  let f = fib(32)
+  let t1 = time.now_ms()
+  var counts: Map[Int, Int] = {}
+  var xs: List[Int] = []
+  for i in 0..1000000 {
+    let k = i * 7919 % 10007
+    counts[k] = counts.get(k).unwrap_or(0) + 1
+    xs.push(k)
+  }
+  let total = xs.sorted().take(1000).sum()
+  let t2 = time.now_ms()
+  var s = ""
+  for i in 0..200000 {
+    s += "{i},"
+  }
+  let words = s.split(",").len()
+  let t3 = time.now_ms()
+  io.println("fib={f} keys={counts.len()} total={total} words={words}")
+  io.println("fib {t1 - t0} ms, map+list+sort {t2 - t1} ms, strings {t3 - t2} ms")
+  Ok(())
+}

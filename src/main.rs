@@ -9,6 +9,9 @@ const USAGE: &str = "drift — compiler for the Drift language
 usage:
   drift check [--json] [--fix] <file|dir>...   all diagnostics (syntax, types, effects, layout); --fix applies every certain fix
   drift fmt [--check] <file|dir>...            rewrite files in canonical form; --check only lists them
+  drift run <file|dir> [args...]               check, compile through C and run `main`
+  drift build <file|dir> [-o out]              native executable (gcc -O2)
+  drift test [--json] <file|dir>...            run every `examples` and `test` block, each in its own process
   drift outline <std.module|file>              signatures and types of a module
   drift parse <file> [--ast]                   parse one file; --ast prints the tree
   drift card                                   print the language card
@@ -35,8 +38,9 @@ fn collect(root: &Path, path: &Path, out: &mut Vec<Input>) -> std::io::Result<()
     } else {
         let rel = path.strip_prefix(root).unwrap_or(path).with_extension("");
         let mut parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().to_string()).collect();
-        if parts.len() > 1 && parts[0] == "src" {
-            parts.remove(0);
+        // a `src` directory is a project root: `app/src/shop/offers.dr` is module `shop.offers`
+        if let Some(i) = parts[..parts.len() - 1].iter().rposition(|p| p == "src") {
+            parts.drain(..=i);
         }
         out.push(Input { path: path.to_path_buf(), module: parts.join(".") });
     }
@@ -44,6 +48,8 @@ fn collect(root: &Path, path: &Path, out: &mut Vec<Input>) -> std::io::Result<()
 }
 
 fn inputs(args: &[String]) -> Result<Vec<Input>, ExitCode> {
+    let args: Vec<String> = args.to_vec();
+    let args = &args[..];
     let mut files = Vec::new();
     for a in args.iter().filter(|a| !a.starts_with("--")) {
         let p = Path::new(a);
@@ -60,38 +66,23 @@ fn inputs(args: &[String]) -> Result<Vec<Input>, ExitCode> {
     Ok(files)
 }
 
-fn check(args: &[String]) -> ExitCode {
-    let json = args.iter().any(|a| a == "--json");
-    let fix = args.iter().any(|a| a == "--fix");
-    let ins = match inputs(args) {
-        Ok(f) => f,
-        Err(c) => return c,
-    };
+fn load(ins: &[Input]) -> Result<Vec<SourceFile>, ExitCode> {
     let mut files = Vec::new();
-    for i in &ins {
+    for i in ins {
         match std::fs::read_to_string(&i.path) {
             Ok(src) => files.push(SourceFile { name: i.path.display().to_string(), src, module: i.module.clone(), is_std: false }),
             Err(e) => {
                 eprintln!("drift: cannot read {}: {}", i.path.display(), e);
-                return ExitCode::from(2);
+                return Err(ExitCode::from(2));
             }
         }
     }
-    let mut fixed = vec![false; files.len()];
-    if fix {
-        fixed = fix_files(&mut files);
-        for (i, f) in files.iter().enumerate() {
-            if fixed[i] {
-                if let Err(e) = std::fs::write(&ins[i].path, &f.src) {
-                    eprintln!("drift: cannot write {}: {}", f.name, e);
-                    return ExitCode::from(2);
-                }
-            }
-        }
-    }
-    let diags = analyze(&files);
-    let mut errors = 0;
-    let mut holes = 0;
+    Ok(files)
+}
+
+/// Print diagnostics; returns (errors, holes).
+fn report(files: &[SourceFile], diags: &[Vec<drift::diag::Diag>], json: bool) -> (usize, usize) {
+    let (mut errors, mut holes) = (0, 0);
     for (i, ds) in diags.iter().enumerate() {
         let idx = LineIndex::new(&files[i].src);
         for d in ds {
@@ -108,6 +99,142 @@ fn check(args: &[String]) -> ExitCode {
             }
         }
     }
+    (errors, holes)
+}
+
+/// Check and compile to an executable; diagnostics go to stdout like `drift check`.
+fn build_exe(path: &str, test: bool, opt: &str) -> Result<PathBuf, ExitCode> {
+    let ins = inputs(&[path.to_string()])?;
+    let files = load(&ins)?;
+    let c = match drift::driver::compile(&files, test) {
+        Ok(c) => c,
+        Err(diags) => {
+            let (errors, holes) = report(&files, &diags, false);
+            if errors == 0 && holes > 0 {
+                eprintln!("drift: {} `todo` hole(s) left; fill them before running (`drift test` runs the finished parts)", holes);
+            } else {
+                eprintln!("drift: {} error(s); nothing was run", errors);
+            }
+            return Err(ExitCode::from(1));
+        }
+    };
+    drift::toolchain::link(&c, opt).map_err(|e| {
+        eprintln!("drift: {}", e);
+        ExitCode::from(3)
+    })
+}
+
+fn exit_of(status: std::process::ExitStatus) -> ExitCode {
+    use std::os::unix::process::ExitStatusExt;
+    match status.code() {
+        Some(c) => ExitCode::from(c as u8),
+        None => ExitCode::from(128 + status.signal().unwrap_or(0) as u8),
+    }
+}
+
+fn run_cmd(args: &[String]) -> ExitCode {
+    use std::os::unix::process::CommandExt;
+    let Some(path) = args.first() else {
+        eprintln!("{}", USAGE);
+        return ExitCode::from(2);
+    };
+    let exe = match build_exe(path, false, "-O1") {
+        Ok(e) => e,
+        Err(c) => return c,
+    };
+    match std::process::Command::new(&exe).arg0(path).args(&args[1..]).status() {
+        Ok(st) => exit_of(st),
+        Err(e) => {
+            eprintln!("drift: cannot run {}: {}", exe.display(), e);
+            ExitCode::from(3)
+        }
+    }
+}
+
+fn build_cmd(args: &[String]) -> ExitCode {
+    let mut out: Option<String> = None;
+    let mut path: Option<String> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "-o" {
+            out = it.next().cloned();
+        } else if !a.starts_with('-') {
+            path = Some(a.clone());
+        }
+    }
+    let Some(path) = path else {
+        eprintln!("{}", USAGE);
+        return ExitCode::from(2);
+    };
+    let exe = match build_exe(&path, false, "-O2") {
+        Ok(e) => e,
+        Err(c) => return c,
+    };
+    let out = out.unwrap_or_else(|| {
+        Path::new(&path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "a.out".into())
+    });
+    if let Err(e) = std::fs::copy(&exe, &out) {
+        eprintln!("drift: cannot write {}: {}", out, e);
+        return ExitCode::from(2);
+    }
+    eprintln!("built {}", out);
+    ExitCode::SUCCESS
+}
+
+fn test_cmd(args: &[String]) -> ExitCode {
+    let json = args.iter().any(|a| a == "--json");
+    let paths: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
+    if paths.is_empty() {
+        eprintln!("{}", USAGE);
+        return ExitCode::from(2);
+    }
+    let mut status = ExitCode::SUCCESS;
+    for p in paths {
+        let exe = match build_exe(p, true, "-O1") {
+            Ok(e) => e,
+            Err(c) => return c,
+        };
+        let mut cmd = std::process::Command::new(&exe);
+        if json {
+            cmd.arg("--json");
+        }
+        match cmd.status() {
+            Ok(st) if st.success() => {}
+            Ok(st) => status = exit_of(st),
+            Err(e) => {
+                eprintln!("drift: cannot run {}: {}", exe.display(), e);
+                return ExitCode::from(3);
+            }
+        }
+    }
+    status
+}
+
+fn check(args: &[String]) -> ExitCode {
+    let json = args.iter().any(|a| a == "--json");
+    let fix = args.iter().any(|a| a == "--fix");
+    let ins = match inputs(args) {
+        Ok(f) => f,
+        Err(c) => return c,
+    };
+    let mut files = match load(&ins) {
+        Ok(f) => f,
+        Err(c) => return c,
+    };
+    let mut fixed = vec![false; files.len()];
+    if fix {
+        fixed = fix_files(&mut files);
+        for (i, f) in files.iter().enumerate() {
+            if fixed[i] {
+                if let Err(e) = std::fs::write(&ins[i].path, &f.src) {
+                    eprintln!("drift: cannot write {}: {}", f.name, e);
+                    return ExitCode::from(2);
+                }
+            }
+        }
+    }
+    let diags = analyze(&files);
+    let (errors, holes) = report(&files, &diags, json);
     if !json {
         eprintln!(
             "checked {} file(s), fixed {}: {} error(s), {} hole(s)",
@@ -225,6 +352,9 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(|s| s.as_str()) {
         Some("check") => check(&args[1..]),
+        Some("run") => run_cmd(&args[1..]),
+        Some("build") => build_cmd(&args[1..]),
+        Some("test") => test_cmd(&args[1..]),
         Some("fmt") => fmt_cmd(&args[1..]),
         Some("outline") => outline_cmd(&args[1..]),
         Some("parse") => parse_cmd(&args[1..]),

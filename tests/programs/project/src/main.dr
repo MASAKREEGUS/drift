@@ -1,0 +1,13 @@
+import shop.offers.{Offer}
+
+pub fn main() -> Result[(), Error] uses io {
+  let lines = ["pan,900,1000", "malformed", "cafe,2000,2500"]
+  let offers = lines
+    .map(|l| Offer.parse(l))
+    .filter(|o| o.is_some())
+    .map(|o| o.unwrap_or(Offer { sku: "", price: 0, reference: 1 }))
+  for o in offers.sorted_by(|o| -o.discount()) {
+    io.println("{o.sku}: {o.discount()}%")
+  }
+  Ok(())
+}

@@ -1,0 +1,21 @@
+/// Discount rules shared by the shop.
+pub struct Offer { sku: Str, price: Int, reference: Int }
+
+pub fn discount(self: Offer) -> Int
+  requires self.reference > 0
+{
+  (self.reference - self.price) * 100 / self.reference
+}
+
+pub fn Offer.parse(line: Str) -> Option[Offer] {
+  match line.split(",") {
+    [sku, price, reference] => Some(
+      Offer { sku, price: price.parse_int()?, reference: reference.parse_int()? },
+    )
+    _ => None
+  }
+}
+
+examples discount {
+  Offer { sku: "a", price: 80, reference: 100 }.discount() == 20
+}
