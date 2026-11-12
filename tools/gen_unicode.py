@@ -66,6 +66,12 @@ def main():
     parts.append(emit_ranges("uc_alpha", ranges(str.isalpha)))
     parts.append(emit_ranges("uc_alnum", ranges(str.isalnum)))
     parts.append(emit_ranges("uc_space", ranges(str.isspace)))
+    # Final_Sigma (str.lower of U+03A3): unicodedata has no Cased/Case_Ignorable, so they are read off
+    # str.lower itself. Only `cased` of characters that are not case-ignorable is ever consulted.
+    sigma_followed = lambda ch: ("A\u03a3" + ch).lower()[1] == "\u03c3"         # not ignorable and cased
+    sigma_before = lambda ch: ("A\u03a3" + ch + "A").lower()[1] == "\u03c3"     # ignorable or cased
+    parts.append(emit_ranges("uc_ignorable", ranges(lambda ch: sigma_before(ch) and not sigma_followed(ch))))
+    parts.append(emit_ranges("uc_cased", ranges(sigma_followed)))
     ccc = []
     for c in cps():
         k = unicodedata.combining(chr(c))

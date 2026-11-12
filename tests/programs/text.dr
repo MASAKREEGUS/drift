@@ -2,6 +2,7 @@ pub fn main() -> Result[(), Error] uses io {
   // Unicode case, decomposition and properties agree with Python's str methods
   let s = "Ñandú PINGÜINO Straße İstanbul ǅemal ﬁ² ①"
   io.println(s.to_lower())
+  io.println("ΟΔΟΣ ΣΑΣ Σ ΑΣ. ἈΣ Σ'Α".to_lower())
   io.println(s.to_upper())
   io.println(s.to_lower().nfkd().strip_marks())
   io.println("{"한국".nfkd().len()} {"ȩ́".nfkd() == "ȩ́"} {"ὦ".nfkd().strip_marks()}")
