@@ -77,8 +77,15 @@ field indices, how `?` converts an error, which variant a pattern names); the ge
 - `drift test` forks one process per `examples`/`test` block and captures its stderr; holes panic only when reached.
 - The runtime object and program binaries are cached by content hash in `~/.cache/drift`.
 - Checked in CI-style runs with AddressSanitizer + UBSan + LeakSanitizer (`DRIFT_CFLAGS`).
-Known limits: `spawn`/`par_map`/channels run sequentially until phase 5; `http`, `html`, `json` natives arrive
-in phase 4 (calling them panics with a clear message); a value leaked on an early `?` exit is reclaimed at process end.
+Reified generics: `json.decode[T]` is the one generic whose type must exist at run time. The checker records the
+concrete `T` of each call (E0803 if it is unknown, a type parameter, a function or an opaque handle) and the
+generator passes a static `DTy` descriptor; every other generic stays erased.
+JSON mapping: numbers, Bool, Str; Bytes as base64; `()`/`None` as null and `Some(x)` as `x`; List/Set/tuple as
+arrays; `Map[Str, V]` as an object, other maps as `[[k, v], ...]`; structs as objects (a missing `Option` field
+decodes as `None`, unknown keys are ignored); unit variants as `"Name"`, others as `{"Name": fields}`;
+`Ok`/`Err` as `{"ok": x}`/`{"err": e}`. Decode errors carry a path: `at $.items[3].price: expected Int, found string`.
+Known limits: `spawn`/`par_map`/channels run sequentially until phase 5; `http` and `html` natives arrive
+later in phase 4 (calling them panics with a clear message); a value leaked on an early `?` exit is reclaimed at process end.
 
 ## 8. Roadmap
 | Phase | Deliverable |

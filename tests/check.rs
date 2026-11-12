@@ -361,3 +361,23 @@ fn std_library_itself_is_consistent() {
         "fn f() -> Result[(), Error] uses io, fs, env, net, time, rand {\n  io.println(\"{env.args().len()} {time.now_ms()} {rand.int(0, 10)}\")\n  let r = http.get(\"x\")?.text()?\n  let d = html.parse(r)\n  let t = d.select_first(\"title\").map(|n| n.text()).unwrap_or(\"\")\n  fs.write_str(\"out\", json.encode(t) + t)?\n  let b = bytes.u32_le(1)\n  io.println(\"{b.len()}\")\n  Ok(())\n}\n",
     );
 }
+
+// ---------------------------------------------------------------- reified generics (json.decode)
+
+#[test]
+fn json_decode_needs_a_concrete_type() {
+    clean("struct P { x: Int }\n\nfn f(s: Str) -> Result[P, json.JsonError] {\n  json.decode(s)\n}\n");
+    clean("fn f(s: Str) -> Result[List[Int], json.JsonError] {\n  let xs = json.decode[List[Int]](s)?\n  Ok(xs)\n}\n");
+    // one mistake, one diagnostic
+    assert_eq!(errors("fn f() -> Result[(), json.JsonError] {\n  let a = json.decode(\"1\")?\n  Ok(())\n}\n"), vec!["E0803"]);
+    assert_eq!(errors("fn f[T](s: Str) -> Result[T, json.JsonError] {\n  json.decode(s)\n}\n"), vec!["E0803"]);
+    assert_eq!(errors("fn f() -> List[Result[Int, json.JsonError]] {\n  [\"1\"].map(json.decode)\n}\n"), vec!["E0803"]);
+}
+
+#[test]
+fn json_decode_rejects_functions_and_handles() {
+    assert_eq!(errors("struct H { f: fn(Int) -> Int }\n\nfn f(s: Str) -> Result[H, json.JsonError] {\n  json.decode(s)\n}\n"), vec!["E0803"]);
+    assert_eq!(errors("fn f(s: Str) -> Result[http.Response, json.JsonError] {\n  json.decode(s)\n}\n"), vec!["E0803"]);
+    // recursive types are fine
+    clean("struct Node { name: Str, kids: List[Node] }\n\nfn f(s: Str) -> Result[Node, json.JsonError] {\n  json.decode(s)\n}\n");
+}

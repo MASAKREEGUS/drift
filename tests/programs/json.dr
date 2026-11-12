@@ -1,0 +1,78 @@
+struct Offer {
+  id: Int
+  title: Str
+  price: Int
+  old_price: Option[Int]
+  tags: List[Str]
+  score: Float
+}
+
+enum Shape {
+  Circle { r: Float }
+  Square(Float)
+  Line(Int, Int)
+  Empty
+}
+
+struct Node { name: Str, kids: List[Node] }
+
+fn show_decode(text: Str) -> Str {
+  let r: Result[Offer, json.JsonError] = json.decode(text)
+  match r {
+    Ok(o) => "ok {o.title} {o.old_price}"
+    Err(e) => "err {e.message}"
+  }
+}
+
+pub fn main() -> Result[(), Error] uses io {
+  let o = Offer {
+    id: 7,
+    title: "Café \"rico\"\n",
+    price: 2500,
+    old_price: None,
+    tags: ["a", "ñ"],
+    score: 0.5,
+  }
+  let text = json.encode(o)
+  io.println(text)
+  let back: Offer = json.decode(text)?
+  io.println("{back == o}")
+  let shapes = [Shape.Circle { r: 1.5 }, Shape.Square(2.0), Shape.Line(1, 2), Shape.Empty]
+  let st = json.encode(shapes)
+  io.println(st)
+  let shapes2 = json.decode[List[Shape]](st)?
+  io.println("{shapes2 == shapes}")
+  let m = {"b": 2, "a": 1}
+  io.println(json.encode(m))
+  io.println(json.encode({1: "x", 2: "y"}))
+  let m2: Map[Int, Str] = json.decode("[[1, \"x\"], [2, \"y\"]]")?
+  io.println("{m2}")
+  let tree = Node { name: "root", kids: [Node { name: "leaf", kids: [] }] }
+  let t2: Node = json.decode(json.encode(tree))?
+  io.println("{t2}")
+  io.println(json.encode((1, true, (), b"hi", Set.of([3, 1]))))
+  let tup: (Int, Bool, (), Bytes, Set[Int]) = json.decode("[1, true, null, \"aGk=\", [3, 1, 3]]")?
+  io.println("{tup}")
+  let r: Result[Int, Str] = json.decode("\{\"err\": \"boom\"\}")?
+  io.println("{r} {json.encode(r)}")
+  io.println(
+    show_decode(
+      "\{\"id\": 1, \"title\": \"x\", \"price\": 3, \"tags\": [], \"score\": 1, \"extra\": 9\}",
+    ),
+  )
+  io.println(
+    show_decode("\{\"id\": 1, \"title\": \"x\", \"price\": 3.5, \"tags\": [], \"score\": 1\}"),
+  )
+  io.println(
+    show_decode("\{\"id\": 1, \"title\": \"x\", \"price\": 3, \"tags\": [1], \"score\": 1\}"),
+  )
+  io.println(show_decode("\{\"id\": 1, \"price\": 3, \"tags\": [], \"score\": 1\}"))
+  io.println(show_decode("\{\"id\": 1,\n \"title\": tru\}"))
+  io.println(show_decode("[1] x"))
+  let u: Str = json.decode("\"\\u00f1\\ud83d\\ude00\\t\"")?
+  io.println("{u.len()} {json.encode(u)}")
+  let small: Result[U8, json.JsonError] = json.decode("300")
+  io.println("{small}")
+  io.println(json.encode([1.0, 0.1, 1e300, -0.0]))
+  Ok(())
+}

@@ -26,6 +26,10 @@ typedef struct DHandle { DObj h; int fd; char* path; } DHandle;
 typedef struct DTask { DObj h; V val; } DTask;
 typedef struct DChan { DObj h; DList* q; int64_t head; } DChan;
 typedef struct DBuf { char* p; int64_t len, cap; } DBuf;
+/* Runtime description of a concrete type, for reified generics (`json.decode[T]`).
+   k: a K_* kind. num: K_INT 0 Int 1 I32 2 U8 3 U32 4 U64; K_FLOAT 0 Float 1 F32.
+   a: element types (List/Set: 1, Map: 2, tuple: n). K_ADT: t and vf[variant][field]. */
+typedef struct DTy { int32_t k, num; int64_t n; const struct DTy* const* a; DType* t; const struct DTy* const* const* vf; } DTy;
 typedef struct DTest { const char* name; V (*fn)(void); int is_example; const char* file; int line; } DTest;
 
 extern const char* d_loc_file;

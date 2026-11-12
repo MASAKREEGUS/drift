@@ -1742,3 +1742,531 @@ V d_n_fs_File_sync(V f) {
   d_release(f);
   return r;
 }
+
+/* ------------------------------------------------------------------ json
+   Mapping: Int/Float -> number, Bool, Str -> string, Bytes -> base64 string, () and None -> null,
+   Some(x) -> x, List/Set/tuple -> array, Map[Str, V] -> object, other maps -> [[k, v], ...],
+   struct -> object, unit variant -> "Name", other variants -> {"Name": fields}, Ok/Err -> {"ok": x}/{"err": e}. */
+
+static const char b64c[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+static void b64_enc(DBuf* b, const unsigned char* p, int64_t n) {
+  for (int64_t i = 0; i < n; i += 3) {
+    uint32_t x = (uint32_t)p[i] << 16 | (i + 1 < n ? (uint32_t)p[i + 1] << 8 : 0) | (i + 2 < n ? p[i + 2] : 0);
+    char q[4] = {b64c[x >> 18 & 63], b64c[x >> 12 & 63], i + 1 < n ? b64c[x >> 6 & 63] : '=', i + 2 < n ? b64c[x & 63] : '='};
+    d_buf_add(b, q, 4);
+  }
+}
+static int b64_val(char c) {
+  if (c >= 'A' && c <= 'Z') return c - 'A';
+  if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+  if (c >= '0' && c <= '9') return c - '0' + 52;
+  if (c == '+' || c == '-') return 62;
+  if (c == '/' || c == '_') return 63;
+  return -1;
+}
+static int b64_dec(const char* s, int64_t n, DBuf* out) {
+  while (n > 0 && s[n - 1] == '=') n--;
+  if (n % 4 == 1) return 0;
+  uint32_t acc = 0; int bits = 0;
+  for (int64_t i = 0; i < n; i++) {
+    int v = b64_val(s[i]);
+    if (v < 0) return 0;
+    acc = acc << 6 | (uint32_t)v; bits += 6;
+    if (bits >= 8) { bits -= 8; char c = (char)(acc >> bits & 0xff); d_buf_add(out, &c, 1); }
+  }
+  return 1;
+}
+
+static void json_str(DBuf* b, const char* p, int64_t n) {
+  buf_ch(b, '"');
+  for (int64_t i = 0; i < n; i++) {
+    unsigned char c = (unsigned char)p[i];
+    switch (c) {
+    case '"': buf_cstr(b, "\\\""); break;
+    case '\\': buf_cstr(b, "\\\\"); break;
+    case '\n': buf_cstr(b, "\\n"); break;
+    case '\r': buf_cstr(b, "\\r"); break;
+    case '\t': buf_cstr(b, "\\t"); break;
+    case '\b': buf_cstr(b, "\\b"); break;
+    case '\f': buf_cstr(b, "\\f"); break;
+    default:
+      if (c < 0x20 || c == 0x7f) buf_fmt(b, "\\u%04x", c); else buf_ch(b, (char)c);
+    }
+  }
+  buf_ch(b, '"');
+}
+static void json_enc(DBuf* b, V v) {
+  switch (v.k) {
+  case K_UNIT: buf_cstr(b, "null"); break;
+  case K_BOOL: buf_cstr(b, v.i ? "true" : "false"); break;
+  case K_INT: buf_fmt(b, "%lld", (long long)v.i); break;
+  case K_FLOAT: if (isfinite(v.f)) show_float(b, v.f); else buf_cstr(b, "null"); break;
+  case K_STR: json_str(b, S(v)->p, S(v)->len); break;
+  case K_BYTES: buf_ch(b, '"'); b64_enc(b, (const unsigned char*)S(v)->p, S(v)->len); buf_ch(b, '"'); break;
+  case K_LIST:
+    buf_ch(b, '[');
+    for (int64_t i = 0; i < L(v)->len; i++) { if (i) buf_ch(b, ','); json_enc(b, L(v)->items[i]); }
+    buf_ch(b, ']');
+    break;
+  case K_TUPLE:
+    buf_ch(b, '[');
+    for (int64_t i = 0; i < T(v)->n; i++) { if (i) buf_ch(b, ','); json_enc(b, T(v)->items[i]); }
+    buf_ch(b, ']');
+    break;
+  case K_SET: case K_MAP: {
+    DMap* m = M(v);
+    int obj = v.k == K_MAP;
+    for (int64_t i = 0; i < m->n && obj; i++) if (m->e[i].live && m->e[i].key.k != K_STR) obj = 0;
+    buf_ch(b, obj ? '{' : '[');
+    int first = 1;
+    for (int64_t i = 0; i < m->n; i++) {
+      if (!m->e[i].live) continue;
+      if (!first) buf_ch(b, ',');
+      first = 0;
+      if (v.k == K_SET) json_enc(b, m->e[i].key);
+      else if (obj) { json_enc(b, m->e[i].key); buf_ch(b, ':'); json_enc(b, m->e[i].val); }
+      else { buf_ch(b, '['); json_enc(b, m->e[i].key); buf_ch(b, ','); json_enc(b, m->e[i].val); buf_ch(b, ']'); }
+    }
+    buf_ch(b, obj ? '}' : ']');
+    break;
+  }
+  case K_ADT: {
+    DAdt* a = A(v);
+    const DVariant* var = &a->t->v[a->tag];
+    if (a->t == &d_td_core_Option) { if (a->tag == 0) json_enc(b, a->f[0]); else buf_cstr(b, "null"); break; }
+    if (a->t == &d_td_core_Result) { buf_cstr(b, a->tag == 0 ? "{\"ok\":" : "{\"err\":"); json_enc(b, a->f[0]); buf_ch(b, '}'); break; }
+    if (a->t->is_enum) {
+      if (a->n == 0 && !var->fields) { json_str(b, var->name, (int64_t)strlen(var->name)); break; }
+      buf_ch(b, '{'); json_str(b, var->name, (int64_t)strlen(var->name)); buf_ch(b, ':');
+    }
+    if (var->fields) {
+      buf_ch(b, '{');
+      for (int i = 0; i < a->n; i++) {
+        if (i) buf_ch(b, ',');
+        json_str(b, var->fields[i], (int64_t)strlen(var->fields[i]));
+        buf_ch(b, ':');
+        json_enc(b, a->f[i]);
+      }
+      buf_ch(b, '}');
+    } else if (a->n == 1) json_enc(b, a->f[0]);
+    else {
+      buf_ch(b, '[');
+      for (int i = 0; i < a->n; i++) { if (i) buf_ch(b, ','); json_enc(b, a->f[i]); }
+      buf_ch(b, ']');
+    }
+    if (a->t->is_enum) buf_ch(b, '}');
+    break;
+  }
+  default: d_panic_c("json.encode: functions, handles, ranges and tasks are not data");
+  }
+}
+V d_n_json_encode(V v) {
+  DBuf b; d_buf_init(&b);
+  json_enc(&b, v);
+  d_release(v);
+  return d_buf_done(&b);
+}
+
+/* parse into a tree first, then convert guided by the target type */
+enum { J_NULL, J_FALSE, J_TRUE, J_NUM, J_STR, J_ARR, J_OBJ };
+typedef struct JNode {
+  int t;
+  int64_t n;             /* string length, element or member count */
+  char* s;               /* J_STR: decoded UTF-8; J_NUM: points into the source */
+  struct JNode* kids;    /* J_ARR elements, J_OBJ values */
+  char** keys; int64_t* klens;
+  int num_int;           /* J_NUM written without fraction or exponent */
+} JNode;
+typedef struct JP { const char* p; const char* end; const char* start; char err[256]; int depth; } JP;
+
+static void jfree(JNode* n) {
+  if (n->t == J_STR) free(n->s);
+  if (n->t == J_ARR || n->t == J_OBJ) {
+    for (int64_t i = 0; i < n->n; i++) { jfree(&n->kids[i]); if (n->keys) free(n->keys[i]); }
+    free(n->kids); free(n->keys); free(n->klens);
+  }
+}
+static int jfail(JP* j, const char* what) {
+  if (j->err[0]) return 0;
+  int line = 1, col = 1;
+  for (const char* q = j->start; q < j->p && q < j->end; q++) { if (*q == '\n') { line++; col = 1; } else col++; }
+  snprintf(j->err, sizeof j->err, "invalid JSON at %d:%d: %s", line, col, what);
+  return 0;
+}
+static void jws(JP* j) { while (j->p < j->end && (*j->p == ' ' || *j->p == '\t' || *j->p == '\n' || *j->p == '\r')) j->p++; }
+static int jhex4(JP* j, uint32_t* out) {
+  if (j->end - j->p < 4) return jfail(j, "short \\u escape");
+  uint32_t x = 0;
+  for (int i = 0; i < 4; i++) {
+    char c = j->p[i]; x <<= 4;
+    if (c >= '0' && c <= '9') x |= (uint32_t)(c - '0');
+    else if (c >= 'a' && c <= 'f') x |= (uint32_t)(c - 'a' + 10);
+    else if (c >= 'A' && c <= 'F') x |= (uint32_t)(c - 'A' + 10);
+    else return jfail(j, "bad hex digit in \\u escape");
+  }
+  j->p += 4; *out = x; return 1;
+}
+static void utf8_put(DBuf* b, uint32_t c) {
+  char q[4]; int n;
+  if (c < 0x80) { q[0] = (char)c; n = 1; }
+  else if (c < 0x800) { q[0] = (char)(0xc0 | c >> 6); q[1] = (char)(0x80 | (c & 63)); n = 2; }
+  else if (c < 0x10000) { q[0] = (char)(0xe0 | c >> 12); q[1] = (char)(0x80 | (c >> 6 & 63)); q[2] = (char)(0x80 | (c & 63)); n = 3; }
+  else { q[0] = (char)(0xf0 | c >> 18); q[1] = (char)(0x80 | (c >> 12 & 63)); q[2] = (char)(0x80 | (c >> 6 & 63)); q[3] = (char)(0x80 | (c & 63)); n = 4; }
+  d_buf_add(b, q, n);
+}
+static int jstring(JP* j, char** out, int64_t* len) {
+  j->p++; /* opening quote */
+  DBuf b; d_buf_init(&b);
+  for (;;) {
+    if (j->p >= j->end) { free(b.p); return jfail(j, "unterminated string"); }
+    unsigned char c = (unsigned char)*j->p;
+    if (c == '"') { j->p++; break; }
+    if (c < 0x20) { free(b.p); return jfail(j, "control character in string (escape it)"); }
+    if (c != '\\') { const char* s = j->p; while (j->p < j->end && *j->p != '"' && *j->p != '\\' && (unsigned char)*j->p >= 0x20) j->p++; d_buf_add(&b, s, j->p - s); continue; }
+    j->p++;
+    if (j->p >= j->end) { free(b.p); return jfail(j, "unterminated escape"); }
+    char e = *j->p++;
+    switch (e) {
+    case '"': buf_ch(&b, '"'); break;
+    case '\\': buf_ch(&b, '\\'); break;
+    case '/': buf_ch(&b, '/'); break;
+    case 'b': buf_ch(&b, '\b'); break;
+    case 'f': buf_ch(&b, '\f'); break;
+    case 'n': buf_ch(&b, '\n'); break;
+    case 'r': buf_ch(&b, '\r'); break;
+    case 't': buf_ch(&b, '\t'); break;
+    case 'u': {
+      uint32_t u;
+      if (!jhex4(j, &u)) { free(b.p); return 0; }
+      if (u >= 0xd800 && u < 0xdc00) {
+        uint32_t lo;
+        if (j->end - j->p < 2 || j->p[0] != '\\' || j->p[1] != 'u') { free(b.p); return jfail(j, "lone surrogate in \\u escape"); }
+        j->p += 2;
+        if (!jhex4(j, &lo)) { free(b.p); return 0; }
+        if (lo < 0xdc00 || lo >= 0xe000) { free(b.p); return jfail(j, "bad surrogate pair"); }
+        u = 0x10000 + ((u - 0xd800) << 10) + (lo - 0xdc00);
+      } else if (u >= 0xdc00 && u < 0xe000) { free(b.p); return jfail(j, "lone surrogate in \\u escape"); }
+      utf8_put(&b, u);
+      break;
+    }
+    default: free(b.p); return jfail(j, "unknown escape");
+    }
+  }
+  if (!utf8_valid(b.p, b.len)) { free(b.p); return jfail(j, "string is not valid UTF-8"); }
+  buf_ch(&b, 0);
+  *out = b.p; *len = b.len - 1;
+  return 1;
+}
+static int jvalue(JP* j, JNode* n) {
+  memset(n, 0, sizeof *n);
+  jws(j);
+  if (j->p >= j->end) return jfail(j, "unexpected end of input");
+  char c = *j->p;
+  if (c == '{' || c == '[') {
+    if (++j->depth > 512) return jfail(j, "nesting deeper than 512 levels");
+    int obj = c == '{';
+    n->t = obj ? J_OBJ : J_ARR;
+    j->p++;
+    int64_t cap = 0;
+    jws(j);
+    if (j->p < j->end && *j->p == (obj ? '}' : ']')) { j->p++; j->depth--; return 1; }
+    for (;;) {
+      if (n->n == cap) {
+        cap = cap ? cap * 2 : 4;
+        n->kids = xrealloc(n->kids, (size_t)cap * sizeof(JNode));
+        if (obj) { n->keys = xrealloc(n->keys, (size_t)cap * sizeof(char*)); n->klens = xrealloc(n->klens, (size_t)cap * sizeof(int64_t)); }
+      }
+      if (obj) {
+        jws(j);
+        if (j->p >= j->end || *j->p != '"') return jfail(j, "expected a string key");
+        if (!jstring(j, &n->keys[n->n], &n->klens[n->n])) return 0;
+        jws(j);
+        if (j->p >= j->end || *j->p != ':') { free(n->keys[n->n]); return jfail(j, "expected `:` after key"); }
+        j->p++;
+      }
+      if (!jvalue(j, &n->kids[n->n])) { if (obj) free(n->keys[n->n]); jfree(&n->kids[n->n]); return 0; }
+      n->n++;
+      jws(j);
+      if (j->p < j->end && *j->p == ',') { j->p++; continue; }
+      if (j->p < j->end && *j->p == (obj ? '}' : ']')) { j->p++; break; }
+      return jfail(j, obj ? "expected `,` or `}`" : "expected `,` or `]`");
+    }
+    j->depth--;
+    return 1;
+  }
+  if (c == '"') { n->t = J_STR; return jstring(j, &n->s, &n->n); }
+  if (c == '-' || (c >= '0' && c <= '9')) {
+    const char* s = j->p;
+    int is_int = 1;
+    if (*j->p == '-') j->p++;
+    if (j->p < j->end && *j->p == '0') j->p++;
+    else if (j->p < j->end && *j->p >= '1' && *j->p <= '9') while (j->p < j->end && *j->p >= '0' && *j->p <= '9') j->p++;
+    else return jfail(j, "bad number");
+    if (j->p < j->end && *j->p == '.') {
+      is_int = 0; j->p++;
+      if (j->p >= j->end || *j->p < '0' || *j->p > '9') return jfail(j, "bad number: digits expected after `.`");
+      while (j->p < j->end && *j->p >= '0' && *j->p <= '9') j->p++;
+    }
+    if (j->p < j->end && (*j->p == 'e' || *j->p == 'E')) {
+      is_int = 0; j->p++;
+      if (j->p < j->end && (*j->p == '+' || *j->p == '-')) j->p++;
+      if (j->p >= j->end || *j->p < '0' || *j->p > '9') return jfail(j, "bad number: digits expected in exponent");
+      while (j->p < j->end && *j->p >= '0' && *j->p <= '9') j->p++;
+    }
+    n->t = J_NUM; n->s = (char*)s; n->n = j->p - s; n->num_int = is_int;
+    return 1;
+  }
+  static const struct { const char* w; int t; } lits[] = {{"null", J_NULL}, {"true", J_TRUE}, {"false", J_FALSE}};
+  for (int i = 0; i < 3; i++) {
+    size_t l = strlen(lits[i].w);
+    if ((size_t)(j->end - j->p) >= l && !memcmp(j->p, lits[i].w, l)) { j->p += l; n->t = lits[i].t; return 1; }
+  }
+  return jfail(j, "unexpected character");
+}
+
+typedef struct JC { DBuf path; char err[512]; } JC;
+static const char* jkind(const JNode* n) {
+  static const char* const k[] = {"null", "false", "true", "number", "string", "array", "object"};
+  return k[n->t];
+}
+static void ty_show(DBuf* b, const DTy* t) {
+  static const char* const ints[] = {"Int", "I32", "U8", "U32", "U64"};
+  switch (t->k) {
+  case K_UNIT: buf_cstr(b, "()"); break;
+  case K_BOOL: buf_cstr(b, "Bool"); break;
+  case K_INT: buf_cstr(b, ints[t->num]); break;
+  case K_FLOAT: buf_cstr(b, t->num ? "F32" : "Float"); break;
+  case K_STR: buf_cstr(b, "Str"); break;
+  case K_BYTES: buf_cstr(b, "Bytes (base64 string)"); break;
+  case K_LIST: buf_cstr(b, "List["); ty_show(b, t->a[0]); buf_ch(b, ']'); break;
+  case K_SET: buf_cstr(b, "Set["); ty_show(b, t->a[0]); buf_ch(b, ']'); break;
+  case K_MAP: buf_cstr(b, "Map["); ty_show(b, t->a[0]); buf_cstr(b, ", "); ty_show(b, t->a[1]); buf_ch(b, ']'); break;
+  case K_TUPLE:
+    buf_ch(b, '(');
+    for (int64_t i = 0; i < t->n; i++) { if (i) buf_cstr(b, ", "); ty_show(b, t->a[i]); }
+    buf_ch(b, ')');
+    break;
+  default: buf_cstr(b, t->t->name);
+  }
+}
+static int jc_fail(JC* c, const char* fmt, ...) {
+  if (c->err[0]) return 0;
+  char m[300];
+  va_list ap; va_start(ap, fmt); vsnprintf(m, sizeof m, fmt, ap); va_end(ap);
+  snprintf(c->err, sizeof c->err, "at %.*s: %s", (int)c->path.len, c->path.p, m);
+  return 0;
+}
+static int jc_expected(JC* c, const DTy* t, const JNode* n) {
+  DBuf b; d_buf_init(&b); ty_show(&b, t); buf_ch(&b, 0);
+  jc_fail(c, "expected %s, found %s", b.p, jkind(n));
+  free(b.p);
+  return 0;
+}
+static int jconv(JC* c, const JNode* n, const DTy* t, V* out);
+static int jconv_at_index(JC* c, const JNode* n, const DTy* t, V* out, int64_t i) {
+  int64_t mark = c->path.len;
+  buf_fmt(&c->path, "[%lld]", (long long)i);
+  int ok = jconv(c, n, t, out);
+  c->path.len = mark;
+  return ok;
+}
+static int jconv_at_key(JC* c, const JNode* n, const DTy* t, V* out, const char* k, int64_t kl) {
+  int64_t mark = c->path.len;
+  int plain = kl > 0;
+  for (int64_t i = 0; i < kl; i++) {
+    char ch = k[i];
+    if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_' || (i && ch >= '0' && ch <= '9'))) plain = 0;
+  }
+  if (plain) { buf_ch(&c->path, '.'); d_buf_add(&c->path, k, kl); }
+  else { buf_ch(&c->path, '['); json_str(&c->path, k, kl); buf_ch(&c->path, ']'); }
+  int ok = jconv(c, n, t, out);
+  c->path.len = mark;
+  return ok;
+}
+static const JNode* jget(const JNode* obj, const char* k) {
+  int64_t kl = (int64_t)strlen(k);
+  const JNode* found = NULL;
+  for (int64_t i = 0; i < obj->n; i++) if (obj->klens[i] == kl && !memcmp(obj->keys[i], k, (size_t)kl)) found = &obj->kids[i];
+  return found; /* last duplicate wins */
+}
+static void release_all(V* vs, int64_t n) { for (int64_t i = 0; i < n; i++) d_release(vs[i]); }
+/* fields of variant `vi` from an object (named), a value (one positional field) or an array */
+static int jfields(JC* c, const JNode* n, const DTy* t, int vi, V* out) {
+  const DVariant* var = &t->t->v[vi];
+  const DTy* const* ft = t->vf[vi];
+  int nf = var->n;
+  V* f = nf ? xmalloc((size_t)nf * sizeof(V)) : NULL;
+  int ok = 1;
+  if (var->fields) {
+    if (n->t != J_OBJ) { free(f); DBuf b; d_buf_init(&b); buf_cstr(&b, "an object for "); ty_show(&b, t); if (t->t->is_enum) { buf_ch(&b, '.'); buf_cstr(&b, var->name); } buf_ch(&b, 0); jc_fail(c, "expected %s, found %s", b.p, jkind(n)); free(b.p); return 0; }
+    for (int i = 0; i < nf && ok; i++) {
+      const JNode* m = jget(n, var->fields[i]);
+      if (!m) {
+        if (ft[i]->k == K_ADT && ft[i]->t == &d_td_core_Option) { f[i] = d_none(); continue; }
+        ok = jc_fail(c, "missing field `%s`", var->fields[i]);
+        release_all(f, i);
+        break;
+      }
+      if (!jconv_at_key(c, m, ft[i], &f[i], var->fields[i], (int64_t)strlen(var->fields[i]))) { release_all(f, i); ok = 0; }
+    }
+  } else if (nf == 1) {
+    ok = jconv(c, n, ft[0], &f[0]);
+  } else if (nf > 1) {
+    if (n->t != J_ARR || n->n != nf) { free(f); return jc_fail(c, "expected an array of %d values for `%s`, found %s", nf, var->name, jkind(n)); }
+    for (int i = 0; i < nf && ok; i++) if (!jconv_at_index(c, &n->kids[i], ft[i], &f[i], i)) { release_all(f, i); ok = 0; }
+  }
+  if (ok) *out = d_adt(t->t, vi, nf, f);
+  free(f);
+  return ok;
+}
+static int jconv(JC* c, const JNode* n, const DTy* t, V* out) {
+  switch (t->k) {
+  case K_UNIT: if (n->t != J_NULL) return jc_expected(c, t, n); *out = D_UNIT; return 1;
+  case K_BOOL: if (n->t != J_TRUE && n->t != J_FALSE) return jc_expected(c, t, n); *out = d_bool(n->t == J_TRUE); return 1;
+  case K_INT: {
+    if (n->t != J_NUM) return jc_expected(c, t, n);
+    char tmp[64];
+    if (!n->num_int || n->n >= (int64_t)sizeof tmp) {
+      if (!n->num_int) return jc_fail(c, "expected an integer, found %.*s", (int)(n->n > 40 ? 40 : n->n), n->s);
+      return jc_fail(c, "integer out of range");
+    }
+    memcpy(tmp, n->s, (size_t)n->n); tmp[n->n] = 0;
+    errno = 0;
+    static const int64_t lo[] = {INT64_MIN, INT32_MIN, 0, 0, 0};
+    static const int64_t hi[] = {INT64_MAX, INT32_MAX, 255, 4294967295LL, INT64_MAX};
+    if (t->num == 4 && tmp[0] != '-') {
+      unsigned long long u = strtoull(tmp, NULL, 10);
+      if (errno) return jc_fail(c, "%s does not fit in U64", tmp);
+      *out = d_int((int64_t)u); return 1;
+    }
+    long long x = strtoll(tmp, NULL, 10);
+    if (errno || x < lo[t->num] || x > hi[t->num]) { DBuf b; d_buf_init(&b); ty_show(&b, t); buf_ch(&b, 0); jc_fail(c, "%s does not fit in %s", tmp, b.p); free(b.p); return 0; }
+    *out = d_int(x); return 1;
+  }
+  case K_FLOAT: {
+    if (n->t != J_NUM) return jc_expected(c, t, n);
+    char tmp[512];
+    int64_t l = n->n < (int64_t)sizeof tmp - 1 ? n->n : (int64_t)sizeof tmp - 1;
+    memcpy(tmp, n->s, (size_t)l); tmp[l] = 0;
+    double f = strtod(tmp, NULL);
+    *out = d_float(t->num ? (double)(float)f : f); return 1;
+  }
+  case K_STR: if (n->t != J_STR) return jc_expected(c, t, n); *out = str_from(K_STR, n->s, n->n); return 1;
+  case K_BYTES: {
+    if (n->t != J_STR) return jc_expected(c, t, n);
+    DBuf b; d_buf_init(&b);
+    if (!b64_dec(n->s, n->n, &b)) { free(b.p); return jc_fail(c, "invalid base64 for Bytes"); }
+    *out = buf_done_kind(&b, K_BYTES); return 1;
+  }
+  case K_LIST: case K_SET: {
+    if (n->t != J_ARR) return jc_expected(c, t, n);
+    V l = list_new(n->n);
+    for (int64_t i = 0; i < n->n; i++) {
+      V x;
+      if (!jconv_at_index(c, &n->kids[i], t->a[0], &x, i)) { d_release(l); return 0; }
+      lpush(l, x);
+    }
+    *out = t->k == K_SET ? d_n_core_List_to_set(l) : l;
+    return 1;
+  }
+  case K_TUPLE: {
+    if (n->t != J_ARR || n->n != t->n) {
+      if (n->t == J_ARR) return jc_fail(c, "expected an array of %lld values, found %lld", (long long)t->n, (long long)n->n);
+      return jc_expected(c, t, n);
+    }
+    V* items = xmalloc((size_t)t->n * sizeof(V));
+    for (int64_t i = 0; i < t->n; i++) if (!jconv_at_index(c, &n->kids[i], t->a[i], &items[i], i)) { release_all(items, i); free(items); return 0; }
+    *out = d_tuple(t->n, items);
+    free(items);
+    return 1;
+  }
+  case K_MAP: {
+    V m = map_new(K_MAP, n->n);
+    if (n->t == J_OBJ && (t->a[0]->k == K_STR || n->n == 0)) {
+      for (int64_t i = 0; i < n->n; i++) {
+        V x;
+        if (!jconv_at_key(c, &n->kids[i], t->a[1], &x, n->keys[i], n->klens[i])) { d_release(m); return 0; }
+        map_put(M(m), str_from(K_STR, n->keys[i], n->klens[i]), x);
+      }
+    } else if (n->t == J_ARR && t->a[0]->k != K_STR) {
+      for (int64_t i = 0; i < n->n; i++) {
+        const JNode* p = &n->kids[i];
+        int64_t mark = c->path.len;
+        buf_fmt(&c->path, "[%lld]", (long long)i);
+        if (p->t != J_ARR || p->n != 2) { jc_fail(c, "expected a [key, value] pair, found %s", jkind(p)); d_release(m); return 0; }
+        V k, x;
+        if (!jconv_at_index(c, &p->kids[0], t->a[0], &k, 0)) { d_release(m); return 0; }
+        if (!jconv_at_index(c, &p->kids[1], t->a[1], &x, 1)) { d_release(k); d_release(m); return 0; }
+        c->path.len = mark;
+        map_put(M(m), k, x);
+      }
+    } else {
+      d_release(m);
+      return jc_fail(c, "expected %s, found %s", t->a[0]->k == K_STR ? "an object" : "an array of [key, value] pairs", jkind(n));
+    }
+    *out = m;
+    return 1;
+  }
+  case K_ADT: {
+    DType* dt = t->t;
+    if (dt == &d_td_core_Option) {
+      if (n->t == J_NULL) { *out = d_none(); return 1; }
+      V x;
+      if (!jconv(c, n, t->vf[0][0], &x)) return 0;
+      *out = d_some(x); return 1;
+    }
+    if (dt == &d_td_core_Result) {
+      const JNode* ok = n->t == J_OBJ && n->n == 1 ? jget(n, "ok") : NULL;
+      const JNode* er = n->t == J_OBJ && n->n == 1 ? jget(n, "err") : NULL;
+      if (!ok && !er) return jc_fail(c, "expected {\"ok\": ...} or {\"err\": ...}, found %s", jkind(n));
+      V x;
+      if (!jconv_at_key(c, ok ? ok : er, t->vf[ok ? 0 : 1][0], &x, ok ? "ok" : "err", ok ? 2 : 3)) return 0;
+      *out = ok ? d_ok(x) : d_err(x); return 1;
+    }
+    if (!dt->is_enum) return jfields(c, n, t, 0, out);
+    const char* name; int64_t nl; const JNode* body = NULL;
+    if (n->t == J_STR) { name = n->s; nl = n->n; }
+    else if (n->t == J_OBJ && n->n == 1) { name = n->keys[0]; nl = n->klens[0]; body = &n->kids[0]; }
+    else return jc_fail(c, "expected a `%s` variant (\"Name\" or {\"Name\": ...}), found %s", dt->name, jkind(n));
+    for (int vi = 0; vi < dt->nv; vi++) {
+      const DVariant* var = &dt->v[vi];
+      if ((int64_t)strlen(var->name) != nl || memcmp(var->name, name, (size_t)nl)) continue;
+      if (var->n == 0) {
+        if (body && body->t != J_NULL && !(body->t == J_OBJ && body->n == 0)) return jc_fail(c, "variant `%s` has no fields", var->name);
+        *out = d_adt(dt, vi, 0, NULL); return 1;
+      }
+      if (!body) return jc_fail(c, "variant `%s` needs fields: {\"%s\": ...}", var->name, var->name);
+      int64_t mark = c->path.len;
+      buf_ch(&c->path, '.'); buf_cstr(&c->path, var->name);
+      int r = jfields(c, body, t, vi, out);
+      c->path.len = mark;
+      return r;
+    }
+    return jc_fail(c, "`%.*s` is not a variant of `%s`", (int)(nl > 60 ? 60 : nl), name, dt->name);
+  }
+  default: return jc_fail(c, "this type cannot be decoded");
+  }
+}
+static V json_err(const char* msg) {
+  V m = str_from(K_STR, msg, (int64_t)strlen(msg));
+  return d_err(d_adt(&d_td_json_JsonError, 0, 1, &m));
+}
+V d_n_json_decode(V text, const DTy* ty) {
+  JP j = {S(text)->p, S(text)->p + S(text)->len, S(text)->p, {0}, 0};
+  JNode root;
+  V r;
+  if (!jvalue(&j, &root)) { jfree(&root); r = json_err(j.err); }
+  else {
+    jws(&j);
+    if (j.p < j.end) { jfail(&j, "unexpected text after the value"); jfree(&root); r = json_err(j.err); }
+    else {
+      JC c; d_buf_init(&c.path); buf_ch(&c.path, '$'); c.err[0] = 0;
+      V x;
+      r = jconv(&c, &root, ty, &x) ? d_ok(x) : json_err(c.err);
+      free(c.path.p);
+      jfree(&root);
+    }
+  }
+  d_release(text);
+  return r;
+}

@@ -59,6 +59,8 @@ pub(crate) enum Note {
     TrySame,
     TryToError,
     TryWrap(usize, usize),
+    /// Concrete type a reified generic (`json.decode[T]`) is called at; kind b'g' on the call.
+    TypeArg(Ty),
 }
 
 /// Note keys: (module, span.lo, span.hi, kind) with kind b'p' path/field, b'c' call, b't' `?`, b's' literal, b'P' pattern.
@@ -73,6 +75,7 @@ pub struct Program {
     pub(crate) fns: Vec<FnInfo>,
     pub(crate) consts: Vec<ConstInfo>,
     pub(crate) notes: HashMap<NoteKey, Note>,
+    pub(crate) core: Core,
 }
 
 /// Type-check and keep the tables for code generation.
@@ -89,6 +92,7 @@ pub fn check_program(files: &[SourceFile], asts: Vec<Module>) -> (Vec<(usize, Di
         fns: std::mem::take(&mut c.fns),
         consts: std::mem::take(&mut c.consts),
         notes: std::mem::take(&mut c.notes),
+        core: c.core,
     };
     (out, prog)
 }
@@ -117,7 +121,7 @@ fn unit() -> Ty {
     Ty::Tuple(vec![])
 }
 
-fn subst(t: &Ty, owner: Owner, args: &[Ty]) -> Ty {
+pub(crate) fn subst(t: &Ty, owner: Owner, args: &[Ty]) -> Ty {
     match t {
         Ty::Gen(o, i) if *o == owner => args.get(*i).cloned().unwrap_or(Ty::Err),
         Ty::Named(d, a) => Ty::Named(*d, a.iter().map(|x| subst(x, owner, args)).collect()),
@@ -488,6 +492,7 @@ struct Checker<'f> {
     gens: Vec<(String, Ty)>,
     holes: Vec<(Span, Ty, Vec<(String, Ty)>)>,
     infer_lets: Vec<(String, Span, Ty)>,
+    reified: Vec<(Span, Ty)>,
     notes: HashMap<NoteKey, Note>,
 }
 
@@ -526,6 +531,7 @@ impl<'f> Checker<'f> {
             gens: Vec::new(),
             holes: Vec::new(),
             infer_lets: Vec::new(),
+            reified: Vec::new(),
             notes: HashMap::new(),
         }
     }
@@ -1301,6 +1307,7 @@ impl<'f> Checker<'f> {
         self.rets.clear();
         self.holes.clear();
         self.infer_lets.clear();
+        self.reified.clear();
         self.effects = effects;
         self.reported_effects = 0;
         self.effect_insert = insert;
@@ -1319,6 +1326,16 @@ impl<'f> Checker<'f> {
             d.scope = scope.iter().map(|(n, t)| (n.clone(), self.show(&self.zonk(t)))).collect();
             self.emit(d);
         }
+        for (span, ty) in std::mem::take(&mut self.reified) {
+            let z = self.zonk(&ty);
+            match self.decodable(&z, &mut Vec::new()) {
+                Ok(()) => self.note(span, b'g', Note::TypeArg(z)),
+                Err(why) => {
+                    self.emit(Diag::error("E0803", span, format!("`json.decode` cannot decode this type: {}", why)));
+                    self.poison(&z);
+                }
+            }
+        }
         for (name, span, ty) in std::mem::take(&mut self.infer_lets) {
             let z = self.zonk(&ty);
             if self.has_var(&z) {
@@ -1327,6 +1344,60 @@ impl<'f> Checker<'f> {
             }
         }
         self.gens.clear();
+    }
+
+    /// Bind every unknown in `t` to the error type (its cause was already reported).
+    fn poison(&mut self, t: &Ty) {
+        match t {
+            Ty::Var(v) => self.vars[*v] = Some(Ty::Err),
+            Ty::Named(_, a) | Ty::Tuple(a) => a.iter().for_each(|x| self.poison(x)),
+            Ty::Fn(p, r, _, _) => {
+                p.iter().for_each(|x| self.poison(x));
+                self.poison(r);
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether values of `t` can be rebuilt from JSON (a concrete type made of data, no functions or handles).
+    fn decodable(&self, t: &Ty, seen: &mut Vec<usize>) -> Result<(), String> {
+        let c = self.core;
+        match t {
+            Ty::Err => Ok(()),
+            Ty::Var(_) => Err("the target type is not known; annotate it: `let x: T = json.decode(text)?` or `json.decode[T](text)`".into()),
+            Ty::Gen(..) => Err(format!("`{}` is a type parameter here; decode at a call site where the type is concrete", self.show(t))),
+            Ty::Fn(..) => Err("functions are not data".into()),
+            Ty::Never => Err("`Never` has no values".into()),
+            Ty::Tuple(ts) => ts.iter().try_for_each(|x| self.decodable(x, seen)),
+            Ty::Named(d, args) => {
+                let d = *d;
+                if [c.int, c.i32, c.u8, c.u32, c.u64, c.float, c.f32, c.bool, c.str, c.bytes].contains(&d) {
+                    return Ok(());
+                }
+                if [c.list, c.set, c.map, c.option, c.result].contains(&d) {
+                    return args.iter().try_for_each(|x| self.decodable(x, seen));
+                }
+                if seen.contains(&d) {
+                    return Ok(());
+                }
+                seen.push(d);
+                let o = Owner::Def(d);
+                let r = match &self.defs[d].kind {
+                    DefKind::Struct(fs) if !(fs.is_empty() && self.mods[self.defs[d].module].is_std) => {
+                        fs.iter().try_for_each(|(_, ft)| self.decodable(&subst(ft, o, args), seen))
+                    }
+                    DefKind::Enum(vs) => vs.iter().try_for_each(|(_, v)| match v {
+                        VFields::Unit => Ok(()),
+                        VFields::Tuple(ts) => ts.iter().try_for_each(|x| self.decodable(&subst(x, o, args), seen)),
+                        VFields::Named(fs) => fs.iter().try_for_each(|(_, x)| self.decodable(&subst(x, o, args), seen)),
+                    }),
+                    DefKind::Alias(a) => self.decodable(&subst(a, o, args), seen),
+                    _ => Err(format!("`{}` is an opaque runtime value, not data", self.show(t))),
+                };
+                seen.pop();
+                r
+            }
+        }
     }
 
     fn has_var(&self, t: &Ty) -> bool {
@@ -2176,12 +2247,16 @@ impl<'f> Checker<'f> {
     }
 
     fn fn_value(&mut self, fid: usize, span: Span) -> Ty {
-        let (_, params, ret) = self.instantiate_fn(fid, None);
+        let targs = if self.is_reified(fid) { Some(vec![Ty::Err]) } else { None };
+        let (_, params, ret) = self.instantiate_fn(fid, targs);
         let eff = self.fns[fid].effects;
         let name = format!("`{}`", self.fns[fid].name);
         self.require_effects(eff, span, &name);
         if self.fns[fid].is_method {
             self.emit(Diag::error("E0105", span, format!("{} is a method; call it as `value.{}(...)`", name, self.fns[fid].name)));
+        }
+        if self.is_reified(fid) {
+            self.emit(Diag::error("E0803", span, format!("{} needs its target type at the call; call it directly: `|s| json.decode[T](s)`", name)));
         }
         Ty::Fn(params.into_iter().map(|p| p.ty).collect(), Box::new(ret), eff, false)
     }
@@ -2979,8 +3054,16 @@ impl<'f> Checker<'f> {
         Ty::Named(d, targs)
     }
 
+    fn is_reified(&self, fid: usize) -> bool {
+        let f = &self.fns[fid];
+        f.name == "decode" && self.mods[f.module].is_std && self.mods[f.module].path == "std.json"
+    }
+
     fn call_fn(&mut self, fid: usize, recv: Option<(&Expr, Ty)>, args: &[Expr], e: &Expr, targs: Option<Vec<Ty>>, exp: Option<&Ty>) -> Ty {
-        let (_, mut params, ret) = self.instantiate_fn(fid, targs);
+        let (targs, mut params, ret) = self.instantiate_fn(fid, targs);
+        if self.is_reified(fid) && !self.mods[self.cur].is_std {
+            self.reified.push((e.span, targs[0].clone()));
+        }
         let name = self.fns[fid].name.clone();
         if let Some((rexpr, rty)) = recv {
             let p0 = params.remove(0);

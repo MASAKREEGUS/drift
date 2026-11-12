@@ -16,7 +16,7 @@ fn read(path: &str) -> String {
 
 #[test]
 fn golden_programs() {
-    for (name, code) in [("values", 0), ("closures", 0), ("control", 0), ("errors", 1)] {
+    for (name, code) in [("values", 0), ("closures", 0), ("control", 0), ("errors", 1), ("json", 0)] {
         let (out, err, c) = drift(&["run", &format!("tests/programs/{}.dr", name)]);
         assert_eq!(out, read(&format!("tests/programs/{}.out", name)), "{}: stderr:\n{}", name, err);
         assert_eq!(c, code, "{}: {}", name, err);

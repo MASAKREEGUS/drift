@@ -6,7 +6,7 @@
 //! Mutation goes through `V*` slots made unique first (copy-on-write).
 
 use crate::ast::*;
-use crate::check::{DefKind, Note, Program, Ty, VFields};
+use crate::check::{subst, DefKind, Note, Owner, Program, Ty, VFields};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 pub const RT_H: &str = include_str!("runtime/drift_rt.h");
@@ -57,6 +57,10 @@ struct Gen<'p> {
     ctor_wrappers: BTreeSet<(usize, usize)>,
     lines: Vec<Vec<usize>>,
     implemented: HashSet<String>,
+    /// Runtime type descriptors (`DTy`) for reified generics, keyed by the type.
+    tys: HashMap<String, String>,
+    ty_fwd: String,
+    ty_out: String,
 }
 
 fn c_str(s: &[u8]) -> String {
@@ -121,6 +125,9 @@ pub fn generate(p: &Program, target: &Target) -> String {
         ctor_wrappers: BTreeSet::new(),
         lines: p.files.iter().map(|(_, src, _)| std::iter::once(0).chain(src.match_indices('\n').map(|(i, _)| i + 1)).collect()).collect(),
         implemented: implemented_natives(),
+        tys: HashMap::new(),
+        ty_fwd: String::new(),
+        ty_out: String::new(),
     };
     for fid in 0..p.fns.len() {
         if !p.mods[p.fns[fid].module].is_std_mod() {
@@ -194,6 +201,9 @@ pub fn missing_natives(p: &Program) -> Vec<String> {
         ctor_wrappers: BTreeSet::new(),
         lines: Vec::new(),
         implemented: implemented_natives(),
+        tys: HashMap::new(),
+        ty_fwd: String::new(),
+        ty_out: String::new(),
     };
     let mut out: Vec<String> = (0..p.fns.len())
         .filter(|&f| p.mods[p.fns[f].module].is_std)
@@ -371,8 +381,12 @@ impl<'p> Gen<'p> {
             format!("f_{}", fid)
         }
     }
+    fn is_reified(&self, fid: usize) -> bool {
+        let f = &self.p.fns[fid];
+        f.name == "decode" && self.p.mods[f.module].path == "std.json"
+    }
     fn fn_sig_params(&self, fid: usize, named: bool) -> String {
-        let ps: Vec<String> = self.p.fns[fid]
+        let mut ps: Vec<String> = self.p.fns[fid]
             .params
             .iter()
             .enumerate()
@@ -381,6 +395,9 @@ impl<'p> Gen<'p> {
                 if named { format!("{} {}{}", t, if p.mutable { "p" } else { "a" }, i) } else { t.to_string() }
             })
             .collect();
+        if self.is_reified(fid) {
+            ps.push(if named { "const DTy* ty".into() } else { "const DTy*".into() });
+        }
         if ps.is_empty() { "void".into() } else { ps.join(", ") }
     }
     /// Field names (or positional indices) of a struct or of variant `vi` of an enum.
@@ -394,6 +411,69 @@ impl<'p> Gen<'p> {
             },
             _ => vec![],
         }
+    }
+    /// A static `DTy` describing `t` (fully concrete), shared by every use of the same type.
+    fn ty_desc(&mut self, t: &Ty) -> String {
+        if let Ty::Named(d, args) = t {
+            if let DefKind::Alias(x) = &self.p.defs[*d].kind {
+                return self.ty_desc(&subst(x, Owner::Def(*d), args));
+            }
+        }
+        let key = format!("{:?}", t);
+        if let Some(n) = self.tys.get(&key) {
+            return n.clone();
+        }
+        let name = format!("ty_{}", self.tys.len());
+        self.tys.insert(key, name.clone());
+        self.ty_fwd.push_str(&format!("static const DTy {};\n", name));
+        let c = self.p.core;
+        let arr = |g: &mut Self, suffix: &str, ts: &[Ty]| -> String {
+            if ts.is_empty() {
+                return "NULL".into();
+            }
+            let names: Vec<String> = ts.iter().map(|x| format!("&{}", g.ty_desc(x))).collect();
+            let a = format!("{}_{}", name, suffix);
+            g.ty_out.push_str(&format!("static const DTy* const {}[] = {{{}}};\n", a, names.join(", ")));
+            a
+        };
+        let (k, num, n, a, td, vf): (&str, i32, usize, String, String, String) = match t {
+            Ty::Tuple(ts) if ts.is_empty() => ("K_UNIT", 0, 0, "NULL".into(), "NULL".into(), "NULL".into()),
+            Ty::Tuple(ts) => {
+                let a = arr(self, "a", ts);
+                ("K_TUPLE", 0, ts.len(), a, "NULL".into(), "NULL".into())
+            }
+            Ty::Named(d, args) => {
+                let d = *d;
+                let nums = [(c.int, "K_INT", 0), (c.i32, "K_INT", 1), (c.u8, "K_INT", 2), (c.u32, "K_INT", 3), (c.u64, "K_INT", 4), (c.float, "K_FLOAT", 0), (c.f32, "K_FLOAT", 1), (c.bool, "K_BOOL", 0), (c.str, "K_STR", 0), (c.bytes, "K_BYTES", 0)];
+                if let Some((_, k, num)) = nums.iter().find(|(x, _, _)| *x == d) {
+                    (*k, *num, 0, "NULL".into(), "NULL".into(), "NULL".into())
+                } else if d == c.list || d == c.set || d == c.map {
+                    let a = arr(self, "a", args);
+                    (if d == c.list { "K_LIST" } else if d == c.set { "K_SET" } else { "K_MAP" }, 0, args.len(), a, "NULL".into(), "NULL".into())
+                } else {
+                    let o = Owner::Def(d);
+                    let variants: Vec<Vec<Ty>> = match &self.p.defs[d].kind {
+                        DefKind::Struct(fs) => vec![fs.iter().map(|(_, x)| subst(x, o, args)).collect()],
+                        DefKind::Enum(vs) => vs
+                            .iter()
+                            .map(|(_, v)| match v {
+                                VFields::Unit => vec![],
+                                VFields::Tuple(ts) => ts.iter().map(|x| subst(x, o, args)).collect(),
+                                VFields::Named(fs) => fs.iter().map(|(_, x)| subst(x, o, args)).collect(),
+                            })
+                            .collect(),
+                        _ => vec![],
+                    };
+                    let vnames: Vec<String> = variants.iter().enumerate().map(|(i, fs)| arr(self, &format!("v{}", i), fs)).collect();
+                    let vf = format!("{}_vf", name);
+                    self.ty_out.push_str(&format!("static const DTy* const* const {}[] = {{{}}};\n", vf, if vnames.is_empty() { "NULL".into() } else { vnames.join(", ") }));
+                    ("K_ADT", 0, variants.len(), "NULL".into(), format!("&{}", self.td(d)), vf)
+                }
+            }
+            _ => ("K_UNIT", 0, 0, "NULL".into(), "NULL".into(), "NULL".into()),
+        };
+        self.ty_out.push_str(&format!("static const DTy {} = {{{}, {}, {}, {}, {}, {}}};\n", name, k, num, n, a, td, vf));
+        name
     }
     fn variant_count(&self, d: usize) -> usize {
         match &self.p.defs[d].kind {
@@ -1097,7 +1177,10 @@ impl<'p> Gen<'p> {
         };
         match self.note(target.span, b'p') {
             Some(Note::Fn(fid)) => {
-                let vs: Vec<String> = args.iter().map(|a| self.expr(a)).collect();
+                let mut vs: Vec<String> = args.iter().map(|a| self.expr(a)).collect();
+                if let Some(Note::TypeArg(t)) = self.note(e.span, b'g') {
+                    vs.push(format!("&{}", self.ty_desc(&t)));
+                }
                 let name = self.fn_cname(fid);
                 self.call_tmp(format!("{}({})", name, vs.join(", ")))
             }
@@ -1195,6 +1278,9 @@ impl<'p> Gen<'p> {
             ));
         }
         out.push('\n');
+        out.push_str(&self.ty_fwd);
+        out.push_str(&self.ty_out);
+        out.push('\n');
         for i in 0..self.lits.len() {
             out.push_str(&format!("V K{};\n", i));
         }
@@ -1207,7 +1293,10 @@ impl<'p> Gen<'p> {
                 let f = &self.p.fns[fid];
                 let what = format!("{}.{}", self.p.mods[f.module].path.trim_start_matches("std."), f.name);
                 let params = self.fn_sig_params(fid, true);
-                let uses: String = (0..f.params.len()).map(|i| format!("(void){}{}; ", if f.params[i].mutable { "p" } else { "a" }, i)).collect();
+                let mut uses: String = (0..f.params.len()).map(|i| format!("(void){}{}; ", if f.params[i].mutable { "p" } else { "a" }, i)).collect();
+                if self.is_reified(fid) {
+                    uses.push_str("(void)ty; ");
+                }
                 out.push_str(&format!("static V {}({}) {{ {}d_unimpl({}); }}\n", name, params, uses, c_str(what.as_bytes())));
             }
         }

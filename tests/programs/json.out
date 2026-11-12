@@ -1,0 +1,20 @@
+{"id":7,"title":"Café \"rico\"\n","price":2500,"old_price":null,"tags":["a","ñ"],"score":0.5}
+true
+[{"Circle":{"r":1.5}},{"Square":2.0},{"Line":[1,2]},"Empty"]
+true
+{"b":2,"a":1}
+[[1,"x"],[2,"y"]]
+{1: "x", 2: "y"}
+Node { name: "root", kids: [Node { name: "leaf", kids: [] }] }
+[1,true,null,"aGk=",[3,1]]
+(1, true, (), b"hi", Set.of([3, 1]))
+Err("boom") {"err":"boom"}
+ok x None
+err at $.price: expected an integer, found 3.5
+err at $.tags[0]: expected Str, found number
+err at $: missing field `title`
+err invalid JSON at 2:11: unexpected character
+err invalid JSON at 1:5: unexpected text after the value
+3 "ñ😀\t"
+Err(JsonError { message: "at $: 300 does not fit in U8" })
+[1.0,0.1,1e+300,-0.0]
