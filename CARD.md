@@ -174,6 +174,9 @@ Every std module is always in scope (`io.println`, `fs.read_str`, `http.get`, `j
 
 ## Standard library (signatures: `drift outline std.<module>`)
 `io fs net http json str list map set math time rand env proc db (sqlite, postgres) re (regex) html (parse, select) bytes hash (sha256, fnv) log`
+- `env.args()` starts with the program name: the first argument is `env.args().get(1)`.
+- `json.decode` needs the target type at the call: `let o: Offer = json.decode(text)?` or `json.decode[List[Offer]](text)?`.
+- `http.get`/`http.post` follow redirects and return `Err` (with `.status`) for status >= 400; `http.request(method, url, headers, body)` returns any status. `.text()` honors the response charset.
 
 ## Toolchain — single binary `drift`
 | command | purpose |

@@ -1,0 +1,20 @@
+struct Echo { method: Str, path: Str, query: Map[Str, Str], body: Str, agent: Option[Str] }
+
+fn handle(req: http.Request) -> http.Response {
+  match req.path {
+    "/echo" => {
+      let e = Echo { method: req.method, path: req.path, query: req.query, body: req.body, agent: req.headers.get("user-agent") }
+      http.Response.json(json.encode(e))
+    }
+    "/old" => http.Response.status(302).with_header("Location", "/echo?from=old")
+    "/teapot" => http.Response.text("short and stout").with_status(418)
+    "/missing" => http.Response.text("nothing here").with_status(404)
+    _ => http.Response.html("<h1>hola</h1>")
+  }
+}
+
+pub fn main() -> Result[(), Error] uses io, env, net, spawn {
+  let port = env.args().get(1).unwrap_or("8099")
+  http.serve("127.0.0.1:{port}", handle)?
+  Ok(())
+}

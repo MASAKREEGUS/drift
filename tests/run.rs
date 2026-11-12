@@ -116,3 +116,25 @@ fn only_phase4_natives_are_missing() {
     let unexpected: Vec<&String> = missing.iter().filter(|n| !n.starts_with("d_n_http_") && !n.starts_with("d_n_html_") && !n.starts_with("d_n_json_")).collect();
     assert!(unexpected.is_empty(), "std functions without a native implementation: {:?}", unexpected);
 }
+
+#[test]
+fn http_server_and_client() {
+    let dir = std::env::temp_dir().join(format!("drift-http-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let exe = dir.join("server");
+    let (_, err, c) = drift(&["build", "tests/programs/http_server.dr", "-o", exe.to_str().unwrap()]);
+    assert_eq!(c, 0, "{}", err);
+    let port = (20000 + std::process::id() % 20000).to_string();
+    let mut server = Command::new(&exe).arg(&port).spawn().expect("start server");
+    let addr = format!("127.0.0.1:{}", port);
+    let up = (0..100).any(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::net::TcpStream::connect(&addr).is_ok()
+    });
+    let (out, err, c) = if up { drift(&["run", "tests/programs/http_client.dr", &port]) } else { (String::new(), "server did not start".into(), -1) };
+    server.kill().ok();
+    server.wait().ok();
+    std::fs::remove_dir_all(dir).ok();
+    assert_eq!(c, 0, "{}", err);
+    assert_eq!(out, read("tests/programs/http_client.out").replace("8099", &port), "{}", err);
+}

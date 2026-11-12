@@ -510,9 +510,13 @@ impl<'a> Lexer<'a> {
         self.pos += 1;
         let start = self.pos;
         let mut depth = 0usize;
+        // open `(`/`[`: a quote inside a call such as `{m.get("k")}` starts a literal, it does not end the string
+        let mut parens = 0usize;
         while self.pos < self.end {
             match self.peek() {
                 b'\n' => break,
+                b'(' | b'[' => parens += 1,
+                b')' | b']' => parens = parens.saturating_sub(1),
                 b'{' => depth += 1,
                 b'}' if depth == 0 => {
                     let span = Span::new(start, self.pos);
@@ -527,7 +531,7 @@ impl<'a> Lexer<'a> {
                     return Some(span);
                 }
                 b'}' => depth -= 1,
-                b'"' if depth == 0 => {
+                b'"' if depth == 0 && parens == 0 => {
                     // Interpolations never contain string literals (CARD), so this quote closes the
                     // string and the `}` is missing. Leave the quote for the string lexer.
                     let span = Span::new(start, self.pos);

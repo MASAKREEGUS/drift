@@ -12,6 +12,13 @@
 #include <time.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <poll.h>
+#include <dlfcn.h>
+#include <signal.h>
 
 const char* d_loc_file = "?";
 int d_loc_line = 0;
@@ -337,6 +344,11 @@ static V* map_slot(DMap* m, V key, int insert) {
   }
   ix = map_add_new(m, key, D_UNIT, h);
   return &m->e[ix].val;
+}
+/* borrows key; the value slot or NULL */
+static V* map_lookup(DMap* m, V key) {
+  int64_t ix = map_find(m, key, d_hash(key));
+  return ix >= 0 ? &m->e[ix].val : NULL;
 }
 /* borrows key; returns the removed value (owned) or 0 */
 static int map_take(DMap* m, V key, V* out) {
@@ -716,6 +728,7 @@ static const char* const f_message[] = {"message"};
 static const char* const f_ioerror[] = {"message", "path"};
 static const char* const f_httperror[] = {"message", "status"};
 static const char* const f_request[] = {"method", "path", "query", "headers", "body"};
+static const char* const f_response[] = {"status", "headers", "body"};
 static const DVariant v_option[] = {{"Some", 1, NULL}, {"None", 0, NULL}};
 static const DVariant v_result[] = {{"Ok", 1, NULL}, {"Err", 1, NULL}};
 static const DVariant v_error[] = {{NULL, 1, f_message}};
@@ -723,6 +736,7 @@ static const DVariant v_ioerror[] = {{NULL, 2, f_ioerror}};
 static const DVariant v_mode[] = {{"Read", 0, NULL}, {"Write", 0, NULL}, {"Append", 0, NULL}, {"ReadAppendCreate", 0, NULL}};
 static const DVariant v_httperror[] = {{NULL, 2, f_httperror}};
 static const DVariant v_request[] = {{NULL, 5, f_request}};
+static const DVariant v_response[] = {{NULL, 3, f_response}};
 static const DVariant v_jsonerror[] = {{NULL, 1, f_message}};
 DType d_td_core_Option = {"Option", 2, v_option, 1, 1, NULL};
 DType d_td_core_Result = {"Result", 2, v_result, 1, 1, NULL};
@@ -731,6 +745,7 @@ DType d_td_fs_IoError = {"IoError", 1, v_ioerror, 0, 0, NULL};
 DType d_td_fs_Mode = {"Mode", 4, v_mode, 1, 0, NULL};
 DType d_td_http_HttpError = {"HttpError", 1, v_httperror, 0, 0, NULL};
 DType d_td_http_Request = {"Request", 1, v_request, 0, 0, NULL};
+DType d_td_http_Response = {"Response", 1, v_response, 0, 0, NULL};
 DType d_td_json_JsonError = {"JsonError", 1, v_jsonerror, 0, 0, NULL};
 
 static V mkerror(V msg) { return d_adt(&d_td_core_Error, 0, 1, &msg); }
@@ -2269,4 +2284,662 @@ V d_n_json_decode(V text, const DTy* ty) {
   }
   d_release(text);
   return r;
+}
+
+/* ------------------------------------------------------------------ http
+   HTTP/1.1 over plain sockets. TLS comes from the system OpenSSL 3, loaded with dlopen the first time
+   an https URL is used, so binaries keep no link-time dependency. */
+
+#define HTTP_MAX_HEAD (64 * 1024)
+#define HTTP_MAX_BODY ((int64_t)256 << 20)
+
+static struct {
+  int tried; char err[200]; void* ctx;
+  int (*init_ssl)(uint64_t, const void*);
+  const void* (*client_method)(void);
+  void* (*ctx_new)(const void*);
+  int (*ctx_default_paths)(void*);
+  void (*ctx_set_verify)(void*, int, void*);
+  long (*ctx_ctrl)(void*, int, long, void*);
+  void* (*ssl_new)(void*);
+  int (*set_fd)(void*, int);
+  long (*ctrl)(void*, int, long, void*);
+  int (*set1_host)(void*, const char*);
+  int (*connect)(void*);
+  int (*read)(void*, void*, int);
+  int (*write)(void*, const void*, int);
+  int (*shutdown)(void*);
+  void (*free)(void*);
+  int (*get_error)(const void*, int);
+  long (*verify_result)(const void*);
+  const char* (*verify_str)(long);
+  unsigned long (*err_get)(void);
+  void (*err_str)(unsigned long, char*, size_t);
+} tls;
+
+static int tls_load(void) {
+  if (tls.tried) return tls.ctx != NULL;
+  tls.tried = 1;
+  void* ssl = dlopen("libssl.so.3", RTLD_NOW | RTLD_GLOBAL);
+  void* cry = dlopen("libcrypto.so.3", RTLD_NOW | RTLD_GLOBAL);
+  if (!ssl || !cry) { snprintf(tls.err, sizeof tls.err, "https needs OpenSSL 3 (libssl.so.3): %s", dlerror()); return 0; }
+#define SYM(h, field, name) if (!(*(void**)&tls.field = dlsym(h, name))) { snprintf(tls.err, sizeof tls.err, "OpenSSL is missing %s", name); return 0; }
+  SYM(ssl, init_ssl, "OPENSSL_init_ssl") SYM(ssl, client_method, "TLS_client_method") SYM(ssl, ctx_new, "SSL_CTX_new")
+  SYM(ssl, ctx_default_paths, "SSL_CTX_set_default_verify_paths") SYM(ssl, ctx_set_verify, "SSL_CTX_set_verify")
+  SYM(ssl, ctx_ctrl, "SSL_CTX_ctrl") SYM(ssl, ssl_new, "SSL_new") SYM(ssl, set_fd, "SSL_set_fd") SYM(ssl, ctrl, "SSL_ctrl")
+  SYM(ssl, set1_host, "SSL_set1_host") SYM(ssl, connect, "SSL_connect") SYM(ssl, read, "SSL_read") SYM(ssl, write, "SSL_write")
+  SYM(ssl, shutdown, "SSL_shutdown") SYM(ssl, free, "SSL_free") SYM(ssl, get_error, "SSL_get_error")
+  SYM(ssl, verify_result, "SSL_get_verify_result") SYM(cry, verify_str, "X509_verify_cert_error_string")
+  SYM(cry, err_get, "ERR_get_error") SYM(cry, err_str, "ERR_error_string_n")
+#undef SYM
+  tls.init_ssl(0, NULL);
+  void* ctx = tls.ctx_new(tls.client_method());
+  if (!ctx || tls.ctx_default_paths(ctx) != 1) { snprintf(tls.err, sizeof tls.err, "cannot create a TLS context"); return 0; }
+  tls.ctx_set_verify(ctx, 1 /* SSL_VERIFY_PEER */, NULL);
+  tls.ctx_ctrl(ctx, 123 /* SSL_CTRL_SET_MIN_PROTO_VERSION */, 0x0303 /* TLS 1.2 */, NULL);
+  tls.ctx = ctx;
+  return 1;
+}
+
+typedef struct Conn { int fd; void* ssl; char* buf; int64_t pos, len; } Conn;
+
+static void conn_close(Conn* c) {
+  if (c->ssl) { tls.shutdown(c->ssl); tls.free(c->ssl); c->ssl = NULL; }
+  if (c->fd >= 0) close(c->fd);
+  c->fd = -1;
+  free(c->buf); c->buf = NULL;
+}
+static int64_t conn_raw_read(Conn* c, char* p, int64_t n) {
+  if (c->ssl) {
+    int r = tls.read(c->ssl, p, n > (1 << 30) ? (1 << 30) : (int)n);
+    if (r > 0) return r;
+    int e = tls.get_error(c->ssl, r);
+    return e == 6 /* SSL_ERROR_ZERO_RETURN */ ? 0 : -1;
+  }
+  for (;;) {
+    ssize_t r = recv(c->fd, p, (size_t)n, 0);
+    if (r < 0 && errno == EINTR) continue;
+    return r;
+  }
+}
+static int conn_write(Conn* c, const char* p, int64_t n) {
+  while (n > 0) {
+    int64_t w;
+    if (c->ssl) { int r = tls.write(c->ssl, p, n > (1 << 30) ? (1 << 30) : (int)n); w = r > 0 ? r : -1; }
+    else { w = send(c->fd, p, (size_t)n, MSG_NOSIGNAL); if (w < 0 && errno == EINTR) continue; }
+    if (w <= 0) return 0;
+    p += w; n -= w;
+  }
+  return 1;
+}
+/* buffered reads; return -1 on error, 0 on EOF */
+static int64_t conn_fill(Conn* c) {
+  if (!c->buf) c->buf = xmalloc(16384);
+  if (c->pos < c->len) return c->len - c->pos;
+  c->pos = 0;
+  c->len = conn_raw_read(c, c->buf, 16384);
+  if (c->len < 0) { c->len = 0; return -1; }
+  return c->len;
+}
+/* one line without CRLF; 1 ok, 0 EOF before any byte, -1 error/too long */
+static int conn_line(Conn* c, DBuf* out, int64_t limit) {
+  out->len = 0;
+  int any = 0;
+  for (;;) {
+    int64_t n = conn_fill(c);
+    if (n < 0) return -1;
+    if (n == 0) return any ? 1 : 0;
+    any = 1;
+    char* s = c->buf + c->pos;
+    char* nl = memchr(s, '\n', (size_t)n);
+    int64_t take = nl ? nl - s + 1 : n;
+    d_buf_add(out, s, take);
+    c->pos += take;
+    if (out->len > limit) return -1;
+    if (nl) {
+      out->len--;
+      if (out->len && out->p[out->len - 1] == '\r') out->len--;
+      return 1;
+    }
+  }
+}
+static int conn_read_n(Conn* c, DBuf* out, int64_t n) {
+  while (n > 0) {
+    int64_t a = conn_fill(c);
+    if (a <= 0) return 0;
+    int64_t t = a < n ? a : n;
+    d_buf_add(out, c->buf + c->pos, t);
+    c->pos += t; n -= t;
+  }
+  return 1;
+}
+
+static int connect_timeout(int fd, const struct sockaddr* a, socklen_t al, int ms) {
+  int fl = fcntl(fd, F_GETFL, 0);
+  fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+  int r = connect(fd, a, al);
+  if (r < 0 && errno == EINPROGRESS) {
+    struct pollfd p = {fd, POLLOUT, 0};
+    r = poll(&p, 1, ms);
+    if (r == 1) { int e = 0; socklen_t el = sizeof e; getsockopt(fd, SOL_SOCKET, SO_ERROR, &e, &el); errno = e; r = e ? -1 : 0; }
+    else { if (r == 0) errno = ETIMEDOUT; r = -1; }
+  }
+  fcntl(fd, F_SETFL, fl);
+  return r;
+}
+static void set_timeouts(int fd, int sec) {
+  struct timeval tv = {sec, 0};
+  setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+  setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+}
+
+typedef struct Url { int https; char host[256]; char port[8]; char* target; } Url;
+static int url_parse(const char* u, Url* out, char* err, size_t en) {
+  const char* p;
+  if (!strncmp(u, "http://", 7)) { out->https = 0; p = u + 7; }
+  else if (!strncmp(u, "https://", 8)) { out->https = 1; p = u + 8; }
+  else { snprintf(err, en, "unsupported URL (want http:// or https://): %.100s", u); return 0; }
+  const char* end = p + strcspn(p, "/?#");
+  const char* at = memchr(p, '@', (size_t)(end - p));
+  if (at) { snprintf(err, en, "credentials in URLs are not supported: %.100s", u); return 0; }
+  const char* hs = p; const char* he; const char* port = NULL;
+  if (*p == '[') { hs = p + 1; he = memchr(hs, ']', (size_t)(end - hs)); if (!he) { snprintf(err, en, "bad IPv6 host in %.100s", u); return 0; } if (he + 1 < end && he[1] == ':') port = he + 2; }
+  else { he = memchr(p, ':', (size_t)(end - p)); if (he) port = he + 1; else he = end; }
+  if (he == hs || he - hs >= (int64_t)sizeof out->host) { snprintf(err, en, "bad host in URL %.100s", u); return 0; }
+  memcpy(out->host, hs, (size_t)(he - hs)); out->host[he - hs] = 0;
+  if (port) {
+    if (end - port < 1 || end - port > 5) { snprintf(err, en, "bad port in URL %.100s", u); return 0; }
+    for (const char* q = port; q < end; q++) if (*q < '0' || *q > '9') { snprintf(err, en, "bad port in URL %.100s", u); return 0; }
+    memcpy(out->port, port, (size_t)(end - port)); out->port[end - port] = 0;
+  } else strcpy(out->port, out->https ? "443" : "80");
+  const char* hash = strchr(end, '#');
+  size_t tl = hash ? (size_t)(hash - end) : strlen(end);
+  out->target = xmalloc(tl + 2);
+  if (tl == 0 || *end == '?') { out->target[0] = '/'; memcpy(out->target + 1, end, tl); out->target[tl + 1] = 0; }
+  else { memcpy(out->target, end, tl); out->target[tl] = 0; }
+  return 1;
+}
+
+static int http_connect(Url* u, Conn* c, char* err, size_t en) {
+  memset(c, 0, sizeof *c); c->fd = -1;
+  if (u->https && !tls_load()) { snprintf(err, en, "%s", tls.err); return 0; }
+  struct addrinfo hints, *res = NULL;
+  memset(&hints, 0, sizeof hints);
+  hints.ai_family = AF_UNSPEC; hints.ai_socktype = SOCK_STREAM;
+  int g = getaddrinfo(u->host, u->port, &hints, &res);
+  if (g) { snprintf(err, en, "cannot resolve %s: %s", u->host, gai_strerror(g)); return 0; }
+  int fd = -1, last = 0;
+  for (struct addrinfo* a = res; a; a = a->ai_next) {
+    fd = socket(a->ai_family, a->ai_socktype | SOCK_CLOEXEC, a->ai_protocol);
+    if (fd < 0) { last = errno; continue; }
+    if (connect_timeout(fd, a->ai_addr, a->ai_addrlen, 15000) == 0) break;
+    last = errno; close(fd); fd = -1;
+  }
+  freeaddrinfo(res);
+  if (fd < 0) { snprintf(err, en, "cannot connect to %s:%s: %s", u->host, u->port, strerror(last)); return 0; }
+  set_timeouts(fd, 30);
+  int one = 1; setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+  c->fd = fd;
+  if (u->https) {
+    c->ssl = tls.ssl_new(tls.ctx);
+    tls.set_fd(c->ssl, fd);
+    tls.ctrl(c->ssl, 55 /* SSL_CTRL_SET_TLSEXT_HOSTNAME */, 0, u->host);
+    tls.set1_host(c->ssl, u->host);
+    if (tls.connect(c->ssl) != 1) {
+      long v = tls.verify_result(c->ssl);
+      if (v) snprintf(err, en, "TLS certificate check failed for %s: %s", u->host, tls.verify_str(v));
+      else { char e[160] = "handshake failed"; unsigned long x = tls.err_get(); if (x) tls.err_str(x, e, sizeof e); snprintf(err, en, "TLS with %s failed: %s", u->host, e); }
+      conn_close(c);
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static V http_error(const char* msg, int64_t status) {
+  V f[2] = {str_from(K_STR, msg, (int64_t)strlen(msg)), d_int(status)};
+  return d_err(d_adt(&d_td_http_HttpError, 0, 2, f));
+}
+static void lower_ascii(char* p, int64_t n) { for (int64_t i = 0; i < n; i++) if (p[i] >= 'A' && p[i] <= 'Z') p[i] += 32; }
+static V cstr_v(const char* s) { return str_from(K_STR, s, (int64_t)strlen(s)); }
+/* headers map: lowercase name -> value; repeated headers are joined with ", " */
+static void header_add(V m, const char* name, int64_t nl, const char* val, int64_t vl) {
+  V k = str_from(K_STR, name, nl);
+  lower_ascii(S(k)->p, nl);
+  while (vl && (*val == ' ' || *val == '\t')) { val++; vl--; }
+  while (vl && (val[vl - 1] == ' ' || val[vl - 1] == '\t')) vl--;
+  V* slot = map_lookup(M(m), k);
+  if (slot) {
+    DBuf b; d_buf_init(&b);
+    d_buf_add(&b, S(*slot)->p, S(*slot)->len); d_buf_add(&b, ", ", 2); d_buf_add(&b, val, vl);
+    d_release(*slot); *slot = d_buf_done(&b);
+    d_release(k);
+  } else map_put(M(m), k, str_from(K_STR, val, vl));
+}
+static const char* map_cget(V m, const char* key) {
+  V k = cstr_v(key);
+  V* slot = map_lookup(M(m), k);
+  d_release(k);
+  return slot ? S(*slot)->p : NULL;
+}
+
+/* one exchange; on success *resp is a Response and *location the redirect target (or NULL) */
+static int http_once(const char* method, Url* u, V extra, const char* body, int64_t blen, V* resp, char* err, size_t en) {
+  Conn c;
+  if (!http_connect(u, &c, err, en)) return 0;
+  DBuf q; d_buf_init(&q);
+  buf_fmt(&q, "%s %s HTTP/1.1\r\nHost: ", method, u->target);
+  int v6 = strchr(u->host, ':') != NULL;
+  if (v6) buf_ch(&q, '[');
+  buf_cstr(&q, u->host);
+  if (v6) buf_ch(&q, ']');
+  if (strcmp(u->port, u->https ? "443" : "80")) buf_fmt(&q, ":%s", u->port);
+  buf_cstr(&q, "\r\n");
+  int has_ua = 0, has_ct = 0;
+  if (extra.k == K_MAP) {
+    DMap* m = M(extra);
+    for (int64_t i = 0; i < m->n; i++) {
+      if (!m->e[i].live) continue;
+      DStr *k = S(m->e[i].key), *v = S(m->e[i].val);
+      if (memchr(k->p, '\n', (size_t)k->len) || memchr(k->p, '\r', (size_t)k->len) || memchr(v->p, '\n', (size_t)v->len) || memchr(v->p, '\r', (size_t)v->len)) {
+        snprintf(err, en, "header %.60s contains a line break", k->p); free(q.p); conn_close(&c); return 0;
+      }
+      if (k->len == 10 && !strncasecmp(k->p, "user-agent", 10)) has_ua = 1;
+      if (k->len == 12 && !strncasecmp(k->p, "content-type", 12)) has_ct = 1;
+      if ((k->len == 14 && !strncasecmp(k->p, "content-length", 14)) || (k->len == 4 && !strncasecmp(k->p, "host", 4)) || (k->len == 10 && !strncasecmp(k->p, "connection", 10))) continue;
+      d_buf_add(&q, k->p, k->len); buf_cstr(&q, ": "); d_buf_add(&q, v->p, v->len); buf_cstr(&q, "\r\n");
+    }
+  }
+  if (!has_ua) buf_cstr(&q, "User-Agent: drift/0.4\r\n");
+  buf_cstr(&q, "Accept: */*\r\nConnection: close\r\n");
+  int sends_body = blen > 0 || (strcmp(method, "GET") && strcmp(method, "HEAD"));
+  if (sends_body) {
+    if (!has_ct && blen) buf_cstr(&q, "Content-Type: text/plain; charset=utf-8\r\n");
+    buf_fmt(&q, "Content-Length: %lld\r\n", (long long)blen);
+  }
+  buf_cstr(&q, "\r\n");
+  int ok = conn_write(&c, q.p, q.len) && (!blen || conn_write(&c, body, blen));
+  free(q.p);
+  if (!ok) { snprintf(err, en, "sending the request to %s failed: %s", u->host, strerror(errno)); conn_close(&c); return 0; }
+  DBuf line; d_buf_init(&line);
+  int64_t status = 0;
+  V headers = map_new(K_MAP, 16);
+  DBuf bodyb; d_buf_init(&bodyb);
+  int r;
+  /* status line, skipping 1xx interim responses */
+  for (;;) {
+    r = conn_line(&c, &line, HTTP_MAX_HEAD);
+    buf_ch(&line, 0); line.len--;
+    if (r <= 0 || line.len < 12 || strncmp(line.p, "HTTP/1.", 7)) { snprintf(err, en, r < 0 && errno == EAGAIN ? "%s timed out" : "%s sent no valid HTTP response", u->host); goto fail; }
+    status = strtol(line.p + 9, NULL, 10);
+    if (status < 100 || status > 999) { snprintf(err, en, "%s sent a bad status line", u->host); goto fail; }
+    int64_t total = 0;
+    for (;;) {
+      r = conn_line(&c, &line, HTTP_MAX_HEAD);
+      if (r <= 0) { snprintf(err, en, "%s closed the connection inside the headers", u->host); goto fail; }
+      if (line.len == 0) break;
+      total += line.len;
+      if (total > HTTP_MAX_HEAD) { snprintf(err, en, "%s sent headers over 64 KiB", u->host); goto fail; }
+      char* colon = memchr(line.p, ':', (size_t)line.len);
+      if (colon && status >= 200) header_add(headers, line.p, colon - line.p, colon + 1, line.len - (colon + 1 - line.p));
+    }
+    if (status >= 200) break;
+  }
+  if (strcmp(method, "HEAD") && status != 204 && status != 304) {
+    const char* te = map_cget(headers, "transfer-encoding");
+    const char* cl = map_cget(headers, "content-length");
+    if (te && strstr(te, "chunked")) {
+      for (;;) {
+        if (conn_line(&c, &line, 1024) <= 0) { snprintf(err, en, "%s: broken chunked body", u->host); goto fail; }
+        buf_ch(&line, 0);
+        char* e2; long long n = strtoll(line.p, &e2, 16);
+        if (e2 == line.p || n < 0 || bodyb.len + n > HTTP_MAX_BODY) { snprintf(err, en, "%s: bad chunk size", u->host); goto fail; }
+        if (n == 0) break;
+        if (!conn_read_n(&c, &bodyb, n) || conn_line(&c, &line, 16) <= 0) { snprintf(err, en, "%s: truncated chunked body", u->host); goto fail; }
+      }
+    } else if (cl) {
+      long long n = strtoll(cl, NULL, 10);
+      if (n < 0 || n > HTTP_MAX_BODY) { snprintf(err, en, "%s: body too large (%lld bytes)", u->host, n); goto fail; }
+      if (!conn_read_n(&c, &bodyb, n)) { snprintf(err, en, "%s: body truncated", u->host); goto fail; }
+    } else {
+      for (;;) {
+        int64_t a = conn_fill(&c);
+        if (a < 0) { snprintf(err, en, "%s: reading the body failed", u->host); goto fail; }
+        if (a == 0) break;
+        d_buf_add(&bodyb, c.buf + c.pos, a); c.pos += a;
+        if (bodyb.len > HTTP_MAX_BODY) { snprintf(err, en, "%s: body over 256 MiB", u->host); goto fail; }
+      }
+    }
+  }
+  conn_close(&c);
+  free(line.p);
+  V f[3] = {d_int(status), headers, buf_done_kind(&bodyb, K_BYTES)};
+  *resp = d_adt(&d_td_http_Response, 0, 3, f);
+  return 1;
+fail:
+  conn_close(&c);
+  free(line.p); free(bodyb.p);
+  d_release(headers);
+  return 0;
+}
+
+static char* resolve_location(const Url* base, const char* loc) {
+  DBuf b; d_buf_init(&b);
+  if (!strncmp(loc, "http://", 7) || !strncmp(loc, "https://", 8)) buf_cstr(&b, loc);
+  else {
+    buf_cstr(&b, base->https ? "https://" : "http://");
+    if (!strncmp(loc, "//", 2)) buf_cstr(&b, loc + 2);
+    else {
+      int v6 = strchr(base->host, ':') != NULL;
+      buf_fmt(&b, v6 ? "[%s]:%s" : "%s:%s", base->host, base->port);
+      if (loc[0] == '/') buf_cstr(&b, loc);
+      else {
+        const char* slash = strrchr(base->target, '/');
+        const char* q = strchr(base->target, '?');
+        if (q && slash > q) slash = memrchr(base->target, '/', (size_t)(q - base->target));
+        d_buf_add(&b, base->target, slash ? slash - base->target + 1 : 1);
+        buf_cstr(&b, loc);
+      }
+    }
+  }
+  buf_ch(&b, 0);
+  return b.p;
+}
+
+static V http_do(const char* method0, V url, V headers, V body, int errors_for_status) {
+  char err[400];
+  char method[16];
+  snprintf(method, sizeof method, "%s", method0);
+  char* cur = xmalloc((size_t)S(url)->len + 1);
+  memcpy(cur, S(url)->p, (size_t)S(url)->len + 1);
+  const char* bp = body.k == K_STR ? S(body)->p : "";
+  int64_t bl = body.k == K_STR ? S(body)->len : 0;
+  V result;
+  for (int hop = 0;; hop++) {
+    Url u;
+    if (!url_parse(cur, &u, err, sizeof err)) { result = http_error(err, 0); break; }
+    V resp;
+    int ok = http_once(method, &u, headers, bp, bl, &resp, err, sizeof err);
+    if (!ok) { free(u.target); result = http_error(err, 0); break; }
+    int64_t st = A(resp)->f[0].i;
+    const char* loc = (st == 301 || st == 302 || st == 303 || st == 307 || st == 308) ? map_cget(A(resp)->f[1], "location") : NULL;
+    if (loc && hop < 10) {
+      char* next = resolve_location(&u, loc);
+      free(u.target); free(cur); cur = next;
+      if (st == 303 || ((st == 301 || st == 302) && strcmp(method, "GET") && strcmp(method, "HEAD"))) { strcpy(method, "GET"); bl = 0; }
+      d_release(resp);
+      continue;
+    }
+    free(u.target);
+    if (errors_for_status && st >= 400) {
+      DStr* b = S(A(resp)->f[2]);
+      int64_t sn = b->len < 200 ? b->len : 200;
+      while (sn > 0 && ((unsigned char)b->p[sn - 1] & 0xc0) == 0x80) sn--;
+      snprintf(err, sizeof err, "%s %s: status %lld%s%.*s", method, cur, (long long)st, sn ? ": " : "", (int)sn, b->p);
+      for (char* x = err; *x; x++) if (*x == '\n' || *x == '\r') *x = ' ';
+      d_release(resp);
+      result = http_error(err, st);
+      break;
+    }
+    result = d_ok(resp);
+    break;
+  }
+  free(cur);
+  return result;
+}
+static void http_init_once(void) { static int done; if (!done) { done = 1; signal(SIGPIPE, SIG_IGN); } }
+V d_n_http_get(V url) {
+  http_init_once();
+  V r = http_do("GET", url, D_UNIT, D_UNIT, 1);
+  d_release(url);
+  return r;
+}
+V d_n_http_post(V url, V body) {
+  http_init_once();
+  V r = http_do("POST", url, D_UNIT, body, 1);
+  d_release(url); d_release(body);
+  return r;
+}
+V d_n_http_request(V method, V url, V headers, V body) {
+  http_init_once();
+  V r;
+  DStr* m = S(method);
+  int okm = m->len > 0 && m->len < 16;
+  for (int64_t i = 0; i < m->len && okm; i++) if (m->p[i] < 'A' || m->p[i] > 'Z') okm = 0;
+  if (!okm) r = http_error("bad HTTP method (use an upper-case token such as GET or PUT)", 0);
+  else r = http_do(m->p, url, headers, body, 0);
+  d_release(method); d_release(url); d_release(headers); d_release(body);
+  return r;
+}
+/* charset parameter of a Content-Type value, lower-cased, or "" */
+static void ctype_charset(const char* ct, char* out, size_t n) {
+  out[0] = 0;
+  if (!ct) return;
+  const char* p = strcasestr(ct, "charset=");
+  if (!p) return;
+  p += 8;
+  if (*p == '"') p++;
+  size_t i = 0;
+  while (p[i] && p[i] != ';' && p[i] != '"' && p[i] != ' ' && i + 1 < n) { out[i] = (char)(p[i] >= 'A' && p[i] <= 'Z' ? p[i] + 32 : p[i]); i++; }
+  out[i] = 0;
+}
+/* windows-1252 (what browsers use for iso-8859-1 and latin1 labels) to UTF-8 */
+static V cp1252_to_str(const char* p, int64_t n) {
+  static const uint16_t hi[32] = {0x20ac, 0x81, 0x201a, 0x192, 0x201e, 0x2026, 0x2020, 0x2021, 0x2c6, 0x2030, 0x160, 0x2039, 0x152, 0x8d, 0x17d, 0x8f,
+                                  0x90, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014, 0x2dc, 0x2122, 0x161, 0x203a, 0x153, 0x9d, 0x17e, 0x178};
+  DBuf b; d_buf_init(&b);
+  for (int64_t i = 0; i < n; i++) {
+    unsigned char c = (unsigned char)p[i];
+    utf8_put(&b, c >= 0x80 && c < 0xa0 ? hi[c - 0x80] : c);
+  }
+  return d_buf_done(&b);
+}
+V d_n_http_Response_text(V r) {
+  DStr* b = S(A(r)->f[2]);
+  char cs[40];
+  ctype_charset(map_cget(A(r)->f[1], "content-type"), cs, sizeof cs);
+  V out;
+  if (!strcmp(cs, "iso-8859-1") || !strcmp(cs, "latin1") || !strcmp(cs, "windows-1252") || !strcmp(cs, "us-ascii") || !strcmp(cs, "ascii"))
+    out = d_ok(cp1252_to_str(b->p, b->len));
+  else if (cs[0] && strcmp(cs, "utf-8") && strcmp(cs, "utf8")) {
+    char m[120];
+    snprintf(m, sizeof m, "response charset `%s` is not supported; use `.body()` for the bytes", cs);
+    out = http_error(m, A(r)->f[0].i);
+  } else if (utf8_valid(b->p, b->len)) out = d_ok(str_from(K_STR, b->p, b->len));
+  else out = http_error("response body is not valid UTF-8; use `.body()` for the bytes", A(r)->f[0].i);
+  d_release(r);
+  return out;
+}
+V d_n_http_Response_body(V r) { V b = d_retain(A(r)->f[2]); d_release(r); return b; }
+V d_n_http_Response_status(V r) { V s = A(r)->f[0]; d_release(r); return s; }
+V d_n_http_Response_headers(V r) { V h = d_retain(A(r)->f[1]); d_release(r); return h; }
+V d_n_http_Response_header(V r, V name) {
+  DBuf b; d_buf_init(&b); d_buf_add(&b, S(name)->p, S(name)->len); V k = d_buf_done(&b);
+  lower_ascii(S(k)->p, S(k)->len);
+  V* slot = map_lookup(M(A(r)->f[1]), k);
+  V out = slot ? d_some(d_retain(*slot)) : d_none();
+  d_release(k); d_release(r); d_release(name);
+  return out;
+}
+static V response_new(int64_t status, const char* ctype, V body) {
+  V h = map_new(K_MAP, 4);
+  if (ctype) map_put(M(h), cstr_v("content-type"), cstr_v(ctype));
+  V f[3] = {d_int(status), h, body};
+  return d_adt(&d_td_http_Response, 0, 3, f);
+}
+static V str_to_bytes(V s) { V b = str_from(K_BYTES, S(s)->p, S(s)->len); d_release(s); return b; }
+V d_n_http_Response__json(V body) { return response_new(200, "application/json", str_to_bytes(body)); }
+V d_n_http_Response__text(V body) { return response_new(200, "text/plain; charset=utf-8", str_to_bytes(body)); }
+V d_n_http_Response__html(V body) { return response_new(200, "text/html; charset=utf-8", str_to_bytes(body)); }
+V d_n_http_Response__status(V code) { return response_new(code.i, NULL, str_from(K_BYTES, "", 0)); }
+V d_n_http_Response_with_status(V r, V code) {
+  adt_unique(&r);
+  A(r)->f[0] = code;
+  return r;
+}
+V d_n_http_Response_with_header(V r, V name, V value) {
+  if (memchr(S(name)->p, '\n', (size_t)S(name)->len) || memchr(S(name)->p, '\r', (size_t)S(name)->len) ||
+      memchr(S(value)->p, '\n', (size_t)S(value)->len) || memchr(S(value)->p, '\r', (size_t)S(value)->len))
+    d_panic_c("http header names and values cannot contain line breaks");
+  adt_unique(&r);
+  map_unique(&A(r)->f[1]);
+  V k = str_from(K_STR, S(name)->p, S(name)->len);
+  lower_ascii(S(k)->p, S(k)->len);
+  map_put(M(A(r)->f[1]), k, value);
+  d_release(name);
+  return r;
+}
+
+/* ---- server */
+static const char* reason(int64_t s) {
+  switch (s) {
+  case 200: return "OK"; case 201: return "Created"; case 202: return "Accepted"; case 204: return "No Content";
+  case 301: return "Moved Permanently"; case 302: return "Found"; case 303: return "See Other"; case 304: return "Not Modified";
+  case 307: return "Temporary Redirect"; case 308: return "Permanent Redirect";
+  case 400: return "Bad Request"; case 401: return "Unauthorized"; case 403: return "Forbidden"; case 404: return "Not Found";
+  case 405: return "Method Not Allowed"; case 408: return "Request Timeout"; case 409: return "Conflict"; case 411: return "Length Required";
+  case 413: return "Content Too Large"; case 415: return "Unsupported Media Type"; case 422: return "Unprocessable Content";
+  case 429: return "Too Many Requests"; case 431: return "Request Header Fields Too Large";
+  case 500: return "Internal Server Error"; case 501: return "Not Implemented"; case 502: return "Bad Gateway"; case 503: return "Service Unavailable";
+  default: return "Status";
+  }
+}
+static int hexv(char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; }
+/* percent-decoding; `plus` turns '+' into ' ' (query strings). NULL if the result is not UTF-8. */
+static V pct_decode(const char* p, int64_t n, int plus) {
+  DBuf b; d_buf_init(&b);
+  for (int64_t i = 0; i < n; i++) {
+    char ch = p[i];
+    if (ch == '%' && i + 2 < n && hexv(p[i + 1]) >= 0 && hexv(p[i + 2]) >= 0) { ch = (char)(hexv(p[i + 1]) * 16 + hexv(p[i + 2])); i += 2; }
+    else if (plus && ch == '+') ch = ' ';
+    buf_ch(&b, ch);
+  }
+  if (!utf8_valid(b.p, b.len)) { free(b.p); return D_UNIT; }
+  return d_buf_done(&b);
+}
+static void send_simple(Conn* c, int64_t status, const char* msg) {
+  DBuf b; d_buf_init(&b);
+  buf_fmt(&b, "HTTP/1.1 %lld %s\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s", (long long)status, reason(status), strlen(msg), msg);
+  conn_write(c, b.p, b.len);
+  free(b.p);
+}
+static void serve_one(int fd, V handler) {
+  Conn c; memset(&c, 0, sizeof c); c.fd = fd;
+  set_timeouts(fd, 10);
+  DBuf line; d_buf_init(&line);
+  V headers = map_new(K_MAP, 16), query = map_new(K_MAP, 4);
+  V method = D_UNIT, path = D_UNIT;
+  if (conn_line(&c, &line, 8192) <= 0) goto done;
+  char* sp1 = memchr(line.p, ' ', (size_t)line.len);
+  char* sp2 = sp1 ? memchr(sp1 + 1, ' ', (size_t)(line.len - (sp1 + 1 - line.p))) : NULL;
+  if (!sp1 || !sp2 || sp1 == line.p || sp1[1] != '/') { send_simple(&c, 400, "bad request line\n"); goto done; }
+  method = str_from(K_STR, line.p, sp1 - line.p);
+  char* target = sp1 + 1; int64_t tl = sp2 - target;
+  char* qm = memchr(target, '?', (size_t)tl);
+  path = pct_decode(target, qm ? qm - target : tl, 0);
+  if (path.k != K_STR) { send_simple(&c, 400, "path is not UTF-8\n"); goto done; }
+  if (qm) {
+    char* q = qm + 1; char* qe = target + tl;
+    while (q < qe) {
+      char* amp = memchr(q, '&', (size_t)(qe - q)); if (!amp) amp = qe;
+      char* eq = memchr(q, '=', (size_t)(amp - q));
+      if (amp > q) {
+        V k = pct_decode(q, (eq ? eq : amp) - q, 1);
+        V v = eq ? pct_decode(eq + 1, amp - eq - 1, 1) : str_from(K_STR, "", 0);
+        if (k.k != K_STR || v.k != K_STR) { d_release(k); d_release(v); send_simple(&c, 400, "query is not UTF-8\n"); goto done; }
+        map_put(M(query), k, v);
+      }
+      q = amp + 1;
+    }
+  }
+  int64_t total = 0;
+  for (;;) {
+    int r = conn_line(&c, &line, 8192);
+    if (r <= 0) { send_simple(&c, 400, "incomplete headers\n"); goto done; }
+    if (line.len == 0) break;
+    total += line.len;
+    if (total > HTTP_MAX_HEAD) { send_simple(&c, 431, "headers too large\n"); goto done; }
+    char* colon = memchr(line.p, ':', (size_t)line.len);
+    if (colon) header_add(headers, line.p, colon - line.p, colon + 1, line.len - (colon + 1 - line.p));
+  }
+  DBuf body; d_buf_init(&body);
+  const char* te = map_cget(headers, "transfer-encoding");
+  const char* cl = map_cget(headers, "content-length");
+  if (te) { free(body.p); send_simple(&c, 501, "chunked request bodies are not supported\n"); goto done; }
+  if (cl) {
+    long long n = strtoll(cl, NULL, 10);
+    if (n < 0 || n > ((int64_t)16 << 20)) { free(body.p); send_simple(&c, 413, "body over 16 MiB\n"); goto done; }
+    if (!conn_read_n(&c, &body, n)) { free(body.p); goto done; }
+  }
+  if (!utf8_valid(body.p, body.len)) { free(body.p); send_simple(&c, 415, "body is not UTF-8\n"); goto done; }
+  V f[5] = {method, path, query, headers, d_buf_done(&body)};
+  method = path = query = headers = D_UNIT;
+  V req = d_adt(&d_td_http_Request, 0, 5, f);
+  int is_head = !strcmp(S(f[0])->p, "HEAD");
+  V resp = call1(handler, req);
+  DAdt* ra = A(resp);
+  DStr* rb = S(ra->f[2]);
+  DBuf out; d_buf_init(&out);
+  buf_fmt(&out, "HTTP/1.1 %lld %s\r\n", (long long)ra->f[0].i, reason(ra->f[0].i));
+  DMap* hm = M(ra->f[1]);
+  for (int64_t i = 0; i < hm->n; i++) {
+    if (!hm->e[i].live) continue;
+    DStr *k = S(hm->e[i].key), *v = S(hm->e[i].val);
+    if ((k->len == 14 && !memcmp(k->p, "content-length", 14)) || (k->len == 10 && !memcmp(k->p, "connection", 10))) continue;
+    d_buf_add(&out, k->p, k->len); buf_cstr(&out, ": "); d_buf_add(&out, v->p, v->len); buf_cstr(&out, "\r\n");
+  }
+  buf_fmt(&out, "Content-Length: %lld\r\nConnection: close\r\n\r\n", (long long)rb->len);
+  if (conn_write(&c, out.p, out.len) && !is_head) conn_write(&c, rb->p, rb->len);
+  free(out.p);
+  d_release(resp);
+done:
+  free(line.p);
+  d_release(headers); d_release(query); d_release(method); d_release(path);
+  shutdown(fd, SHUT_WR);
+  conn_close(&c);
+}
+V d_n_http_serve(V addr, V handler) {
+  http_init_once();
+  char host[256] = "", port[8] = "";
+  DStr* a = S(addr);
+  const char* colon = a->len && a->p[0] == '[' ? strstr(a->p, "]:") : strrchr(a->p, ':');
+  if (colon && a->p[0] == '[') colon++;
+  char err[300];
+  if (!colon || a->p + a->len - colon - 1 < 1 || a->p + a->len - colon - 1 > 5) {
+    snprintf(err, sizeof err, "bad listen address %.100s (want host:port or :port)", a->p);
+    d_release(addr); d_release(handler);
+    return http_error(err, 0);
+  }
+  const char* hs = a->p[0] == '[' ? a->p + 1 : a->p;
+  const char* he = a->p[0] == '[' ? colon - 1 : colon;
+  snprintf(host, sizeof host, "%.*s", (int)(he - hs), hs);
+  snprintf(port, sizeof port, "%s", colon + 1);
+  struct addrinfo hints, *res = NULL;
+  memset(&hints, 0, sizeof hints);
+  hints.ai_family = AF_UNSPEC; hints.ai_socktype = SOCK_STREAM; hints.ai_flags = AI_PASSIVE;
+  int g = getaddrinfo(host[0] ? host : NULL, port, &hints, &res);
+  if (g) { snprintf(err, sizeof err, "cannot listen on %.100s: %s", a->p, gai_strerror(g)); d_release(addr); d_release(handler); return http_error(err, 0); }
+  int fd = -1, last = 0;
+  for (struct addrinfo* ai = res; ai; ai = ai->ai_next) {
+    fd = socket(ai->ai_family, ai->ai_socktype | SOCK_CLOEXEC, ai->ai_protocol);
+    if (fd < 0) { last = errno; continue; }
+    int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    if (bind(fd, ai->ai_addr, ai->ai_addrlen) == 0 && listen(fd, 128) == 0) break;
+    last = errno; close(fd); fd = -1;
+  }
+  freeaddrinfo(res);
+  if (fd < 0) { snprintf(err, sizeof err, "cannot listen on %.100s: %s", a->p, strerror(last)); d_release(addr); d_release(handler); return http_error(err, 0); }
+  d_release(addr);
+  fflush(stdout);
+  for (;;) {
+    int cfd = accept4(fd, NULL, NULL, SOCK_CLOEXEC);
+    if (cfd < 0) { if (errno == EINTR || errno == ECONNABORTED || errno == EMFILE || errno == ENFILE) continue; break; }
+    serve_one(cfd, handler);
+    fflush(stdout);
+  }
+  snprintf(err, sizeof err, "accept failed: %s", strerror(errno));
+  close(fd);
+  d_release(handler);
+  return http_error(err, 0);
 }

@@ -84,8 +84,12 @@ JSON mapping: numbers, Bool, Str; Bytes as base64; `()`/`None` as null and `Some
 arrays; `Map[Str, V]` as an object, other maps as `[[k, v], ...]`; structs as objects (a missing `Option` field
 decodes as `None`, unknown keys are ignored); unit variants as `"Name"`, others as `{"Name": fields}`;
 `Ok`/`Err` as `{"ok": x}`/`{"err": e}`. Decode errors carry a path: `at $.items[3].price: expected Int, found string`.
-Known limits: `spawn`/`par_map`/channels run sequentially until phase 5; `http` and `html` natives arrive
-later in phase 4 (calling them panics with a clear message); a value leaked on an early `?` exit is reclaimed at process end.
+HTTP: HTTP/1.1 on plain sockets (connect 15 s, I/O 30 s timeouts, chunked, up to 10 redirects, 256 MiB body cap).
+TLS uses the system OpenSSL 3 through `dlopen` on the first https URL, with peer and hostname verification and
+TLS >= 1.2, so `drift build` output still has no link-time dependency. `http.serve` handles one request per
+connection, sequentially until phase 5 (10 s I/O timeout, 64 KiB headers, 16 MiB bodies, UTF-8 checked).
+Known limits: `spawn`/`par_map`/channels run sequentially until phase 5; `html` natives arrive later in
+phase 4 (calling them panics with a clear message); a value leaked on an early `?` exit is reclaimed at process end.
 
 ## 8. Roadmap
 | Phase | Deliverable |

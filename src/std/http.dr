@@ -1,16 +1,29 @@
-/// HTTP client and server.
+/// HTTP/1.1 client (http and https) and a small server.
+/// `get` and `post` follow redirects and return `Err` for status >= 400; `request` returns any status.
 pub struct HttpError { message: Str, status: Int }
-
 pub struct Request { method: Str, path: Str, query: Map[Str, Str], headers: Map[Str, Str], body: Str }
-
 pub struct Response {}
-
 pub fn get(url: Str) -> Result[Response, HttpError] uses net { todo }
 pub fn post(url: Str, body: Str) -> Result[Response, HttpError] uses net { todo }
+pub fn request(method: Str, url: Str, headers: Map[Str, Str], body: Str) -> Result[Response, HttpError] uses net { todo }
 pub fn text(self: Response) -> Result[Str, HttpError] { todo }
+pub fn body(self: Response) -> Bytes { todo }
 pub fn status(self: Response) -> Int { todo }
 pub fn header(self: Response, name: Str) -> Option[Str] { todo }
+pub fn headers(self: Response) -> Map[Str, Str] { todo }
+pub fn with_status(self: Response, code: Int) -> Response
+  requires code >= 100 and code <= 599
+{
+  todo
+}
+pub fn with_header(self: Response, name: Str, value: Str) -> Response { todo }
 pub fn Response.json(body: Str) -> Response { todo }
 pub fn Response.text(body: Str) -> Response { todo }
-pub fn Response.status(code: Int) -> Response { todo }
+pub fn Response.html(body: Str) -> Response { todo }
+pub fn Response.status(code: Int) -> Response
+  requires code >= 100 and code <= 599
+{
+  todo
+}
+/// Serve forever on `addr` ("host:port", ":port", "[::]:port"), one request per connection.
 pub fn serve(addr: Str, handler: fn(Request) -> Response) -> Result[(), HttpError] uses net, spawn { todo }

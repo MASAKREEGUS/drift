@@ -1,0 +1,9 @@
+200 Some("application/json")
+{"method":"GET","path":"/echo","query":{"q":"café con leche","x":"1"},"body":"","agent":"drift/0.4"}
+{"method":"POST","path":"/echo","query":{},"body":"ñandú","agent":"drift/0.4"}
+{"method":"GET","path":"/echo","query":{"from":"old"},"body":"","agent":"drift/0.4"}
+418 short and stout
+404 GET http://127.0.0.1:8099/missing: status 404: nothing here
+{"content-type": "text/html; charset=utf-8", "content-length": "13", "connection": "close"}
+0 cannot connect to 127.0.0.1:1: Connection refused
+unsupported URL (want http:// or https://): ftp://x

@@ -1,0 +1,33 @@
+fn base() -> Str uses env {
+  let port = env.args().get(1).unwrap_or("8099")
+  "http://127.0.0.1:{port}"
+}
+
+pub fn main() -> Result[(), Error] uses io, env, net {
+  let b = base()
+  let r = http.get("{b}/echo?q=caf%C3%A9+con+leche&x=1")?
+  let ctype = r.header("Content-Type")
+  io.println("{r.status()} {ctype}")
+  io.println(r.text()?)
+  let p = http.post("{b}/echo", "ñandú")?
+  io.println(p.text()?)
+  let red = http.get("{b}/old")?
+  io.println(red.text()?)
+  let tea = http.request("GET", "{b}/teapot", {"User-Agent": "test/1"}, "")?
+  io.println("{tea.status()} {tea.text()?}")
+  match http.get("{b}/missing") {
+    Ok(_) => io.println("unexpected ok")
+    Err(e) => io.println("{e.status} {e.message}")
+  }
+  let home = http.get("{b}/")?
+  io.println("{home.headers()}")
+  match http.get("http://127.0.0.1:1/") {
+    Ok(_) => io.println("unexpected ok")
+    Err(e) => io.println("{e.status} {e.message}")
+  }
+  match http.get("ftp://x") {
+    Ok(_) => io.println("unexpected ok")
+    Err(e) => io.println(e.message)
+  }
+  Ok(())
+}

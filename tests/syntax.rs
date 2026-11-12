@@ -141,3 +141,11 @@ fn diagnostics_sorted_by_position() {
 fn empty_closure_still_parses() {
     assert!(codes("fn f() -> Int { let g = || 1\n  g() }").is_empty());
 }
+
+#[test]
+fn string_literal_inside_interpolation_is_one_diagnostic() {
+    assert_eq!(codes("fn f(m: Map[Str, Int]) -> Str {\n  \"{m.get(\"k\")} ok\"\n}\n"), vec!["L0008"]);
+    assert_eq!(codes("fn f(xs: List[Str]) -> Str {\n  \"{xs.contains(\"a\")}\"\n}\n"), vec!["L0008"]);
+    // a quote with nothing open still means the `}` is missing
+    assert_eq!(codes("fn f(n: Int) -> Str {\n  \"{n\"\n}\n"), vec!["L0005"]);
+}
