@@ -1,0 +1,17 @@
+/// An agent drafting incrementally: `todo` marks unfinished parts.
+/// `drift check --json` reports, for each hole, its expected type and the bindings in scope.
+pub struct Order { id: Int, lines: List[(Str, Int, Int)] }
+
+pub fn total(self: Order) -> Int {
+  self.lines.map(|(_, qty, unit)| qty * unit).sum()
+}
+
+pub fn apply_coupon(self: Order, code: Str) -> Result[Order, Error] {
+  match code {
+    "PAN10" => todo
+    _ => Err(error("unknown coupon {code}"))
+  }
+}
+// expected diagnostic:
+// {"code":"H0001","severity":"hole","span":{"file":"examples/holes.dr","start":[11,16],"end":[11,20]},
+//  "expected":"Result[Order, Error]","scope":{"self":"Order","code":"Str"}}

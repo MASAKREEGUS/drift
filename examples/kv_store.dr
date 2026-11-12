@@ -1,0 +1,74 @@
+/// Append-only key-value store (Bitcask-style): one log file + in-memory index.
+import std.fs
+import std.bytes
+
+pub struct Store {
+  path: Str
+  index: Map[Str, Int]
+  file: fs.File
+}
+
+pub enum StoreError {
+  Io(fs.IoError)
+  Corrupt { offset: Int }
+}
+
+pub fn open(path: Str) -> Result[Store, StoreError] uses fs {
+  let file = fs.open(path, fs.Mode.ReadAppendCreate)?
+  var index: Map[Str, Int] = {}
+  var offset = 0
+  loop {
+    match read_record(file, offset)? {
+      Some((key, _, next)) => {
+        index[key] = offset
+        offset = next
+      }
+      None => break
+    }
+  }
+  Ok(Store { path, index, file })
+}
+
+/// Record layout: u32 key_len | u32 value_len | key | value
+fn read_record(file: fs.File, offset: Int) -> Result[Option[(Str, Bytes, Int)], StoreError] uses fs {
+  let header = file.read_at(offset, 8)?
+  if header.is_empty() {
+    return Ok(None)
+  }
+  if header.len() < 8 {
+    return Err(StoreError.Corrupt { offset })
+  }
+  let klen = header.u32_le(0).to_int()
+  let vlen = header.u32_le(4).to_int()
+  let body = file.read_at(offset + 8, klen + vlen)?
+  if body.len() < klen + vlen {
+    return Err(StoreError.Corrupt { offset })
+  }
+  let key = body.slice(0, klen).to_str().ok_or(StoreError.Corrupt { offset })?
+  Ok(Some((key, body.slice(klen, klen + vlen), offset + 8 + klen + vlen)))
+}
+
+pub fn put(var self: Store, key: Str, value: Bytes) -> Result[(), StoreError] uses fs {
+  let k = key.to_bytes()
+  let offset = self.file.len()?
+  self.file.append(bytes.u32_le(k.len().to_u32()?) + bytes.u32_le(value.len().to_u32()?) + k + value)?
+  self.file.sync()?
+  self.index[key] = offset
+  Ok(())
+}
+
+pub fn get(self: Store, key: Str) -> Result[Option[Bytes], StoreError] uses fs {
+  match self.index.get(key) {
+    None => Ok(None)
+    Some(offset) => Ok(read_record(self.file, offset)?.map(|(_, v, _)| v))
+  }
+}
+
+test "put then get survives reopen" uses fs {
+  let path = fs.temp_path("kv")?
+  var s = open(path)?
+  s.put("a", b"1")?
+  s.put("a", b"2")?
+  let s2 = open(path)?
+  assert s2.get("a")? == Some(b"2"), "last write wins after reopen"
+}

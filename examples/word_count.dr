@@ -1,0 +1,29 @@
+import std.fs
+import std.env
+
+fn count_words(text: Str) -> Map[Str, Int] {
+  var counts: Map[Str, Int] = {}
+  for word in text.to_lower().split_whitespace() {
+    let w = word.trim_matches(|c| not c.is_alphanumeric())
+    if not w.is_empty() {
+      counts[w] = counts.get(w).unwrap_or(0) + 1
+    }
+  }
+  counts
+}
+
+examples count_words {
+  count_words("a b a") == { "a": 2, "b": 1 }
+  count_words("Hola, hola!") == { "hola": 2 }
+  count_words("") == {}
+}
+
+pub fn main() -> Result[(), Error] uses io, fs, env {
+  let path = env.args().get(1).ok_or(error("usage: word_count <file>"))?
+  let text = fs.read_str(path)?
+  let top = count_words(text).entries().sorted_by(|(w, n)| (-n, w)).take(10)
+  for (w, n) in top {
+    io.println("{n}\t{w}")
+  }
+  Ok(())
+}

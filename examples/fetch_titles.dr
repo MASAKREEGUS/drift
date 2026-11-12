@@ -1,0 +1,25 @@
+import std.http
+import std.html
+
+pub enum FetchError {
+  Http(HttpError)
+  NoTitle { url: Str }
+}
+
+fn title(url: Str) -> Result[Str, FetchError] uses net {
+  let body = http.get(url)?.text()?
+  let doc = html.parse(body)
+  doc.select_first("title").map(|n| n.text().trim()).ok_or(FetchError.NoTitle { url })
+}
+
+pub fn main() -> Result[(), Error] uses io, net, spawn {
+  let urls = ["https://example.com", "https://www.rust-lang.org", "https://news.ycombinator.com"]
+  let results = urls.par_map(|u| (u, title(u)))
+  for (u, r) in results {
+    match r {
+      Ok(t) => io.println("{u}\t{t}")
+      Err(e) => io.eprintln("{u}\tERROR {e}")
+    }
+  }
+  Ok(())
+}

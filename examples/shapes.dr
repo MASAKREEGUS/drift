@@ -1,0 +1,46 @@
+pub struct Point { x: Float, y: Float }
+
+pub enum Shape {
+  Circle { center: Point, r: Float }
+  Rect { origin: Point, w: Float, h: Float }
+  Empty
+}
+
+pub const PI: Float = 3.141592653589793
+
+pub fn area(self: Shape) -> Float {
+  match self {
+    Shape.Circle { r, .. } => PI * r * r
+    Shape.Rect { w, h, .. } => w * h
+    Shape.Empty => 0.0
+  }
+}
+
+pub fn translate(self: Shape, dx: Float, dy: Float) -> Shape {
+  match self {
+    Shape.Circle { center, r } => Shape.Circle { center: { center with x: center.x + dx, y: center.y + dy }, r }
+    Shape.Rect { origin, w, h } => Shape.Rect { origin: { origin with x: origin.x + dx, y: origin.y + dy }, w, h }
+    Shape.Empty => Shape.Empty
+  }
+}
+
+examples area {
+  Shape.Rect { origin: Point { x: 0.0, y: 0.0 }, w: 2.0, h: 3.0 }.area() == 6.0
+  Shape.Empty.area() == 0.0
+}
+
+pub fn main() -> Result[(), Error] uses io {
+  let shapes = [
+    Shape.Circle { center: Point { x: 0.0, y: 0.0 }, r: 1.0 },
+    Shape.Rect { origin: Point { x: 1.0, y: 1.0 }, w: 4.0, h: 2.5 },
+    Shape.Empty,
+  ]
+  let total = shapes.map(|s| s.area()).sum()
+  io.println("total area: {total}")
+  let biggest = shapes.max_by(|s| s.area())
+  match biggest {
+    Some(s) => io.println("biggest: {s}")
+    None => io.println("no shapes")
+  }
+  Ok(())
+}

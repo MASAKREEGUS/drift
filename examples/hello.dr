@@ -1,0 +1,4 @@
+pub fn main() -> Result[(), Error] uses io {
+  io.println("hola desde Drift")
+  Ok(())
+}

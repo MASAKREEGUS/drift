@@ -1,0 +1,28 @@
+import std.http
+import std.json
+
+pub struct Item { id: Int, name: Str, price: Int }
+
+fn items() -> List[Item] {
+  [Item { id: 1, name: "cafe", price: 2500 }, Item { id: 2, name: "pan", price: 1200 }]
+}
+
+fn handle(req: http.Request) -> http.Response {
+  match (req.method, req.path.split("/").filter(|s| not s.is_empty())) {
+    ("GET", ["items"]) => http.Response.json(json.encode(items()))
+    ("GET", ["items", id]) => match id.parse_int() {
+      Some(n) => match items().find(|i| i.id == n) {
+        Some(item) => http.Response.json(json.encode(item))
+        None => http.Response.status(404)
+      }
+      None => http.Response.status(400)
+    }
+    _ => http.Response.status(404)
+  }
+}
+
+pub fn main() -> Result[(), Error] uses io, net, spawn {
+  io.println("listening on :8080")
+  http.serve("0.0.0.0:8080", handle)?
+  Ok(())
+}

@@ -1,0 +1,24 @@
+fn fizzbuzz(n: Int) -> Str
+  requires n > 0
+{
+  match (n % 3, n % 5) {
+    (0, 0) => "FizzBuzz"
+    (0, _) => "Fizz"
+    (_, 0) => "Buzz"
+    _ => "{n}"
+  }
+}
+
+examples fizzbuzz {
+  fizzbuzz(1) == "1"
+  fizzbuzz(9) == "Fizz"
+  fizzbuzz(10) == "Buzz"
+  fizzbuzz(30) == "FizzBuzz"
+}
+
+pub fn main() -> Result[(), Error] uses io {
+  for i in 1..=100 {
+    io.println(fizzbuzz(i))
+  }
+  Ok(())
+}
