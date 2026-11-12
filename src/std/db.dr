@@ -1,0 +1,19 @@
+/// SQL databases: SQLite (a file path, or ":memory:") and PostgreSQL ("postgres://user@host/db").
+/// Both use `$1, $2, ...` placeholders; `params` is `()`, one value, or a tuple such as `(id, name)`.
+/// Rows decode into a struct (fields matched to columns by name), a tuple (by position) or one value;
+/// Int, Float, Bool, Str and Bytes map to SQL types and Option to NULL.
+/// `code` is the SQLSTATE: "23505" unique, "23502" not null, "23503" foreign key, "23514" check
+/// (SQLite constraint errors use the same codes), "08000" connection, "42000" bad SQL or parameters.
+pub struct DbError { message: Str, code: Str }
+pub struct Conn {}
+/// SQLite connections have foreign keys enabled and wait up to 5 s for a locked database.
+pub fn open(url: Str) -> Result[Conn, DbError] uses db { todo }
+/// Runs one statement; returns the number of rows it changed.
+pub fn exec[P](self: Conn, sql: Str, params: P) -> Result[Int, DbError] uses db { todo }
+pub fn query[T, P](self: Conn, sql: Str, params: P) -> Result[List[T], DbError] uses db { todo }
+/// The only row, `None` without rows, `Err` if there is more than one.
+pub fn query_one[T, P](self: Conn, sql: Str, params: P) -> Result[Option[T], DbError] uses db { todo }
+/// Runs several `;`-separated statements without parameters (schema setup, BEGIN/COMMIT).
+pub fn exec_script(self: Conn, sql: Str) -> Result[(), DbError] uses db { todo }
+/// "sqlite" or "postgres".
+pub fn backend(self: Conn) -> Str { todo }

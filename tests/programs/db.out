@@ -1,0 +1,17 @@
+inserted 1
+1 Teclado 49990 Paris true
+2 Mouse "pro" ñandú 15990 - false
+3 Monitor 129990 - true
+cheap [("Mouse \"pro\" ñandú", 15990), ("Teclado", 49990)]
+active ["Teclado", "Monitor"]
+summary Some(Summary { n: 3, avg: 65323.333333333336 })
+missing None
+updated 2
+img Some(Some(b"\x00\xc3\xbfx"))
+unique 23505
+check 23514
+decode 22000 row 1: no column `price` for field `Offer.price` (columns: id, title)
+null row 1: column `store` is NULL; declare it as an Option
+params rejected
+one 21000
+after rollback Some(3) sqlite

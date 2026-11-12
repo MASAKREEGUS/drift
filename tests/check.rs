@@ -381,3 +381,17 @@ fn json_decode_rejects_functions_and_handles() {
     // recursive types are fine
     clean("struct Node { name: Str, kids: List[Node] }\n\nfn f(s: Str) -> Result[Node, json.JsonError] {\n  json.decode(s)\n}\n");
 }
+
+#[test]
+fn db_rows_and_params_are_checked() {
+    let pre = "struct Offer { id: Int, title: Str, store: Option[Str] }\n\n";
+    clean(&format!("{}fn f(c: db.Conn) -> Result[List[Offer], db.DbError] uses db {{\n  c.query(\"SELECT id, title, store FROM o WHERE id > $1\", 3)\n}}\n", pre));
+    clean("fn f(c: db.Conn) -> Result[Int, db.DbError] uses db {\n  let xs = c.query[(Str, Option[Int])](\"SELECT a, b FROM t\", ())?\n  c.exec(\"INSERT INTO t VALUES ($1, $2)\", (\"x\", None))\n}\n");
+    // rows must be data made of columns
+    assert_eq!(errors("struct R { tags: List[Str] }\n\nfn f(c: db.Conn) -> Result[List[R], db.DbError] uses db {\n  c.query(\"SELECT tags FROM t\", ())\n}\n"), vec!["E0804"]);
+    assert_eq!(errors("fn f(c: db.Conn) -> Result[Int, db.DbError] uses db {\n  let xs = c.query(\"SELECT 1\", ())?\n  Ok(0)\n}\n"), vec!["E0804"]);
+    // parameters are (), one value or a tuple of values
+    assert_eq!(errors("fn f(c: db.Conn) -> Result[Int, db.DbError] uses db {\n  c.exec(\"DELETE FROM t WHERE id = $1\", [1, 2])\n}\n"), vec!["E0805"]);
+    // and the effect is required
+    assert_eq!(errors("fn f(c: db.Conn) -> Result[Int, db.DbError] {\n  c.exec(\"DELETE FROM t\", ())\n}\n"), vec!["E0301"]);
+}

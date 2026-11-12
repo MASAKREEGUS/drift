@@ -15,6 +15,7 @@ pub const STD_MODULES: &[(&str, &str)] = &[
     ("re", include_str!("std/re.dr")),
     ("html", include_str!("std/html.dr")),
     ("json", include_str!("std/json.dr")),
+    ("db", include_str!("std/db.dr")),
     ("time", include_str!("std/time.dr")),
     ("rand", include_str!("std/rand.dr")),
 ];
@@ -493,7 +494,8 @@ struct Checker<'f> {
     gens: Vec<(String, Ty)>,
     holes: Vec<(Span, Ty, Vec<(String, Ty)>)>,
     infer_lets: Vec<(String, Span, Ty)>,
-    reified: Vec<(Span, Ty)>,
+    /// (span, type, kind): b'j' json.decode target, b'r' SQL row type, b'p' SQL parameters (checked only).
+    reified: Vec<(Span, Ty, u8)>,
     notes: HashMap<NoteKey, Note>,
 }
 
@@ -1327,12 +1329,18 @@ impl<'f> Checker<'f> {
             d.scope = scope.iter().map(|(n, t)| (n.clone(), self.show(&self.zonk(t)))).collect();
             self.emit(d);
         }
-        for (span, ty) in std::mem::take(&mut self.reified) {
+        for (span, ty, kind) in std::mem::take(&mut self.reified) {
             let z = self.zonk(&ty);
-            match self.decodable(&z, &mut Vec::new()) {
-                Ok(()) => self.note(span, b'g', Note::TypeArg(z)),
-                Err(why) => {
-                    self.emit(Diag::error("E0803", span, format!("`json.decode` cannot decode this type: {}", why)));
+            let r = match kind {
+                b'j' => self.decodable(&z, &mut Vec::new()).map_err(|w| ("E0803", format!("`json.decode` cannot decode this type: {}", w))),
+                b'r' => self.sql_row(&z).map_err(|w| ("E0804", format!("invalid query row type: {}", w))),
+                _ => self.sql_params(&z).map_err(|w| ("E0805", w)),
+            };
+            match r {
+                Ok(()) if kind != b'p' => self.note(span, b'g', Note::TypeArg(z)),
+                Ok(()) => {}
+                Err((code, msg)) => {
+                    self.emit(Diag::error(code, span, msg));
                     self.poison(&z);
                 }
             }
@@ -2257,7 +2265,7 @@ impl<'f> Checker<'f> {
             self.emit(Diag::error("E0105", span, format!("{} is a method; call it as `value.{}(...)`", name, self.fns[fid].name)));
         }
         if self.is_reified(fid) {
-            self.emit(Diag::error("E0803", span, format!("{} needs its target type at the call; call it directly: `|s| json.decode[T](s)`", name)));
+            self.emit(Diag::error("E0803", span, format!("{} needs its target type at the call; call it directly, e.g. `|s| json.decode[T](s)`", name)));
         }
         Ty::Fn(params.into_iter().map(|p| p.ty).collect(), Box::new(ret), eff, false)
     }
@@ -2943,10 +2951,24 @@ impl<'f> Checker<'f> {
             if let Some(PathRes::Fn(f)) = self.peek_path(base) {
                 if let Some(ty_ast) = expr_as_type(index) {
                     let t = self.lower_ty(&ty_ast);
-                    let n = self.fns[f].generics.len();
-                    let targs = if n == 1 { Some(vec![t]) } else { None };
+                    let targs = self.explicit_targs(f, t);
                     return self.call_fn(f, None, args, e, targs, exp);
                 }
+            }
+            // value.method[T](...)
+            if let (ExprKind::Field { base: recv, name }, Some(ty_ast)) = (&base.kind, expr_as_type(index)) {
+                let n = self.diags.len();
+                let bt = self.expr(recv, None);
+                let rt = self.resolve(&bt);
+                if let Some(d) = self.head(&rt) {
+                    if let Some(fid) = self.methods.get(&(d, name.name.clone())).copied() {
+                        let t = self.lower_ty(&ty_ast);
+                        let targs = self.explicit_targs(fid, t);
+                        self.note(e.span, b'c', Note::Method(fid));
+                        return self.call_fn(fid, Some((recv, rt.clone())), args, e, targs, exp);
+                    }
+                }
+                self.diags.truncate(n);
             }
         }
         // free call of a method name: `len(xs)` → `xs.len()`
@@ -3055,15 +3077,99 @@ impl<'f> Checker<'f> {
         Ty::Named(d, targs)
     }
 
-    fn is_reified(&self, fid: usize) -> bool {
+    /// The first type argument given explicitly, the others left to inference.
+    fn explicit_targs(&mut self, fid: usize, first: Ty) -> Option<Vec<Ty>> {
+        let n = self.fns[fid].generics.len();
+        if n == 0 {
+            return None;
+        }
+        let mut v = vec![first];
+        for _ in 1..n {
+            let f = self.fresh();
+            v.push(f);
+        }
+        Some(v)
+    }
+
+    /// Std generics whose first type argument must exist at run time: b'j' JSON target, b'r' SQL row.
+    fn reify_kind(&self, fid: usize) -> Option<u8> {
         let f = &self.fns[fid];
-        f.name == "decode" && self.mods[f.module].is_std && self.mods[f.module].path == "std.json"
+        if !self.mods[f.module].is_std {
+            return None;
+        }
+        match (self.mods[f.module].path.as_str(), f.name.as_str()) {
+            ("std.json", "decode") => Some(b'j'),
+            ("std.db", "query") | ("std.db", "query_one") => Some(b'r'),
+            _ => None,
+        }
+    }
+
+    fn is_reified(&self, fid: usize) -> bool {
+        self.reify_kind(fid).is_some()
+    }
+
+    fn is_sql_scalar(&self, t: &Ty) -> bool {
+        let c = self.core;
+        matches!(t, Ty::Err | Ty::Var(_)) || matches!(t, Ty::Named(d, _) if [c.int, c.i32, c.u8, c.u32, c.u64, c.float, c.f32, c.bool, c.str, c.bytes].contains(d))
+    }
+    /// A column value: a scalar or `Option` of one.
+    fn is_sql_cell(&self, t: &Ty) -> bool {
+        match t {
+            Ty::Named(d, a) if *d == self.core.option => a.first().map_or(false, |x| self.is_sql_scalar(x)),
+            _ => self.is_sql_scalar(t),
+        }
+    }
+    /// Row types of `query[T]`: a cell, a tuple of cells, or a struct whose fields are cells.
+    fn sql_row(&self, t: &Ty) -> Result<(), String> {
+        let hint = "rows decode into a struct whose fields are Int/Float/Bool/Str/Bytes (or Option of them), a tuple of those, or one such value";
+        match t {
+            Ty::Var(_) => Err("the row type is not known; write `conn.query[Row](sql, params)` or annotate the result".into()),
+            Ty::Gen(..) => Err(format!("`{}` is a type parameter here; query where the row type is concrete", self.show(t))),
+            _ if self.is_sql_cell(t) => Ok(()),
+            Ty::Tuple(ts) if !ts.is_empty() => match ts.iter().find(|x| !self.is_sql_cell(x)) {
+                None => Ok(()),
+                Some(x) => Err(format!("tuple element `{}` is not a column value; {}", self.show(x), hint)),
+            },
+            Ty::Named(d, args) => match &self.defs[*d].kind {
+                DefKind::Struct(fs) if !fs.is_empty() => {
+                    for (n, ft) in fs {
+                        let ft = subst(ft, Owner::Def(*d), args);
+                        if !self.is_sql_cell(&ft) {
+                            return Err(format!("field `{}: {}` is not a column value; {}", n, self.show(&ft), hint));
+                        }
+                    }
+                    Ok(())
+                }
+                _ => Err(format!("`{}` cannot be a row; {}", self.show(t), hint)),
+            },
+            _ => Err(format!("`{}` cannot be a row; {}", self.show(t), hint)),
+        }
+    }
+    /// SQL parameters: `()`, one cell, or a tuple of cells (bound to $1, $2, ...).
+    fn sql_params(&self, t: &Ty) -> Result<(), String> {
+        match t {
+            Ty::Var(_) | Ty::Err => Ok(()),
+            Ty::Tuple(ts) => match ts.iter().find(|x| !self.is_sql_cell(x)) {
+                None => Ok(()),
+                Some(x) => Err(format!("`{}` cannot be bound as a SQL parameter (use Int, Float, Bool, Str, Bytes or Option of them)", self.show(x))),
+            },
+            _ if self.is_sql_cell(t) => Ok(()),
+            _ => Err(format!("`{}` cannot be bound as SQL parameters: pass `()`, one value or a tuple such as `(id, name)`", self.show(t))),
+        }
     }
 
     fn call_fn(&mut self, fid: usize, recv: Option<(&Expr, Ty)>, args: &[Expr], e: &Expr, targs: Option<Vec<Ty>>, exp: Option<&Ty>) -> Ty {
         let (targs, mut params, ret) = self.instantiate_fn(fid, targs);
-        if self.is_reified(fid) && !self.mods[self.cur].is_std {
-            self.reified.push((e.span, targs[0].clone()));
+        if !self.mods[self.cur].is_std {
+            if let Some(k) = self.reify_kind(fid) {
+                self.reified.push((e.span, targs[0].clone(), k));
+            }
+            let f = &self.fns[fid];
+            if self.mods[f.module].path == "std.db" && matches!(f.name.as_str(), "query" | "query_one" | "exec") {
+                let p = targs.last().cloned().unwrap_or(Ty::Err);
+                let span = args.last().map_or(e.span, |a| a.span);
+                self.reified.push((span, p, b'p'));
+            }
         }
         let name = self.fns[fid].name.clone();
         if let Some((rexpr, rty)) = recv {
@@ -3247,6 +3353,10 @@ fn expr_as_type(e: &Expr) -> Option<Type> {
             }
             t.span = e.span;
             Some(t)
+        }
+        ExprKind::Tuple(items) => {
+            let ts = items.iter().map(expr_as_type).collect::<Option<Vec<_>>>()?;
+            Some(Type { kind: TypeKind::Tuple(ts), span: e.span })
         }
         _ => None,
     }

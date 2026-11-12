@@ -1,0 +1,108 @@
+struct Offer { id: Int, title: Str, price: Int, store: Option[Str], active: Bool }
+
+struct Summary { n: Int, avg: Float }
+
+fn setup(c: db.Conn) -> Result[(), db.DbError] uses db {
+  c.exec_script(
+    r"""
+      DROP TABLE IF EXISTS offer_t;
+      CREATE TABLE offer_t (
+        id INTEGER PRIMARY KEY,
+        title TEXT NOT NULL UNIQUE,
+        price INTEGER NOT NULL CHECK (price > 0),
+        store TEXT,
+        active BOOLEAN NOT NULL,
+        img BYTEA
+      );
+    """,
+  )?
+  Ok(())
+}
+
+fn run(url: Str) -> Result[(), db.DbError] uses io, db {
+  let c = db.open(url)?
+  setup(c)?
+  let added = c.exec(
+    "INSERT INTO offer_t (id, title, price, store, active) VALUES ($1, $2, $3, $4, $5)",
+    (1, "Teclado", 49990, Some("Paris"), true),
+  )?
+  c.exec(
+    "INSERT INTO offer_t (id, title, price, store, active) VALUES ($1, $2, $3, $4, $5)",
+    (2, "Mouse \"pro\" ñandú", 15990, None, false),
+  )?
+  c.exec(
+    "INSERT INTO offer_t (id, title, price, active) VALUES ($1, $2, $3, $4)",
+    (3, "Monitor", 129990, true),
+  )?
+  io.println("inserted {added}")
+  let offers: List[Offer] = c.query(
+    "SELECT id, title, price, store, active FROM offer_t ORDER BY id",
+    (),
+  )?
+  for o in offers {
+    io.println("{o.id} {o.title} {o.price} {o.store.unwrap_or("-")} {o.active}")
+  }
+  let cheap = c.query[(Str, Int)](
+    "SELECT title, price FROM offer_t WHERE price < $1 ORDER BY price",
+    60000,
+  )?
+  io.println("cheap {cheap}")
+  let titles = c.query[Str]("SELECT title FROM offer_t WHERE active = $1 ORDER BY id", true)?
+  io.println("active {titles}")
+  let s = c.query_one[Summary]("SELECT COUNT(*) AS n, AVG(price * 1.0) AS avg FROM offer_t", ())?
+  io.println("summary {s}")
+  let missing = c.query_one[Offer](
+    "SELECT id, title, price, store, active FROM offer_t WHERE id = $1",
+    99,
+  )?
+  io.println("missing {missing}")
+  let changed = c.exec("UPDATE offer_t SET price = price - 1000 WHERE active = $1", true)?
+  io.println("updated {changed}")
+  c.exec("UPDATE offer_t SET img = $1 WHERE id = 1", "\0ÿx".to_bytes())?
+  let img = c.query_one[Option[Bytes]]("SELECT img FROM offer_t WHERE id = 1", ())?
+  io.println("img {img}")
+  // errors carry a SQLSTATE shared by both backends
+  match c.exec(
+    "INSERT INTO offer_t (id, title, price, active) VALUES ($1, $2, $3, $4)",
+    (4, "Teclado", 1, true),
+  ) {
+    Ok(_) => io.println("duplicate accepted?")
+    Err(e) => io.println("unique {e.code}")
+  }
+  match c.exec(
+    "INSERT INTO offer_t (id, title, price, active) VALUES ($1, $2, $3, $4)",
+    (5, "Gratis", 0, true),
+  ) {
+    Ok(_) => io.println("check accepted?")
+    Err(e) => io.println("check {e.code}")
+  }
+  match c.query[Offer]("SELECT id, title FROM offer_t", ()) {
+    Ok(_) => io.println("partial row accepted?")
+    Err(e) => io.println("decode {e.code} {e.message}")
+  }
+  match c.query[Int]("SELECT store FROM offer_t WHERE id = 2", ()) {
+    Ok(_) => io.println("null accepted?")
+    Err(e) => io.println("null {e.message}")
+  }
+  match c.exec("SELECT $1, $2", 1) {
+    Ok(_) => io.println("missing parameter accepted?")
+    Err(_) => io.println("params rejected")
+  }
+  match c.query_one[Int]("SELECT id FROM offer_t", ()) {
+    Ok(_) => io.println("two rows accepted?")
+    Err(e) => io.println("one {e.code}")
+  }
+  c.exec_script("BEGIN; DELETE FROM offer_t; ROLLBACK;")?
+  let left = c.query_one[Int]("SELECT COUNT(*) FROM offer_t", ())?
+  io.println("after rollback {left} {c.backend()}")
+  c.exec_script("DROP TABLE offer_t")?
+  Ok(())
+}
+
+pub fn main() -> Result[(), Error] uses io, db, env {
+  let url = env.get("DRIFT_DB").unwrap_or(":memory:")
+  match run(url) {
+    Ok(()) => Ok(())
+    Err(e) => Err(Error { message: "{e.code}: {e.message}" })
+  }
+}

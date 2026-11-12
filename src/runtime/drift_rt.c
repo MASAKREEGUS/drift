@@ -380,6 +380,8 @@ V d_map(int64_t n, V* kv) {
   return m;
 }
 
+static void db_close(DHandle* h);
+
 /* ------------------------------------------------------------------ free */
 
 void d_free(V v) {
@@ -395,7 +397,7 @@ void d_free(V v) {
   case K_TUPLE: { DTuple* t = T(v); for (int64_t i = 0; i < t->n; i++) d_release(t->items[i]); break; }
   case K_ADT: { DAdt* a = A(v); for (int i = 0; i < a->n; i++) d_release(a->f[i]); break; }
   case K_FN: { DFn* f = (DFn*)v.o; for (int i = 0; i < f->nenv; i++) d_release(f->env[i]); break; }
-  case K_HANDLE: { DHandle* h = (DHandle*)v.o; if (h->fd >= 0) close(h->fd); free(h->path); break; }
+  case K_HANDLE: { DHandle* h = (DHandle*)v.o; if (h->fd >= 0) close(h->fd); if (h->dbk) db_close(h); free(h->path); break; }
   case K_TASK: d_release(((DTask*)v.o)->val); break;
   case K_CHAN: { DChan* c = (DChan*)v.o; d_release(mk(K_LIST, c->q)); break; }
   default: break;
@@ -630,7 +632,7 @@ void d_show_into(DBuf* b, V v, int top) {
   }
   case K_FN: buf_cstr(b, "<fn>"); break;
   case K_RANGE: buf_fmt(b, "%lld..%lld", (long long)((DRange*)v.o)->lo, (long long)((DRange*)v.o)->hi); break;
-  case K_HANDLE: buf_cstr(b, "<file "); buf_cstr(b, ((DHandle*)v.o)->path); buf_ch(b, '>'); break;
+  case K_HANDLE: buf_cstr(b, ((DHandle*)v.o)->dbk ? "<db " : "<file "); buf_cstr(b, ((DHandle*)v.o)->path); buf_ch(b, '>'); break;
   case K_TASK: buf_cstr(b, "<task>"); break;
   default: buf_cstr(b, "<channel>"); break;
   }
@@ -768,6 +770,9 @@ DType d_td_re_Match = {"Match", 1, v_match, 0, 0, NULL};
 DType d_td_html_Document = {"Document", 1, v_doc, 0, 0, NULL};
 DType d_td_html_Node = {"Node", 1, v_node, 0, 0, NULL};
 DType d_td_json_JsonError = {"JsonError", 1, v_jsonerror, 0, 0, NULL};
+static const char* const f_dberror[] = {"message", "code"};
+static const DVariant v_dberror[] = {{NULL, 2, f_dberror}};
+DType d_td_db_DbError = {"DbError", 1, v_dberror, 0, 0, NULL};
 
 static V mkerror(V msg) { return d_adt(&d_td_core_Error, 0, 1, &msg); }
 /* any error value -> core Error; an error struct whose first field is `message` keeps it as the text */
@@ -1604,7 +1609,7 @@ V d_n_env_args(void) {
   for (int i = 0; i < d_argc; i++) lpush(r, cstr(d_argv[i]));
   return r;
 }
-V d_n_env_var(V name) {
+V d_n_env_get(V name) {
   const char* v = getenv(S(name)->p);
   d_release(name);
   return v ? d_some(cstr(v)) : d_none();
@@ -1739,6 +1744,8 @@ V d_n_fs_open(V path, V mode) {
   else {
     DHandle* h = newobj(sizeof(DHandle));
     h->fd = fd;
+    h->dbk = 0;
+    h->db = NULL;
     h->path = strdup(S(path)->p);
     r = d_ok(mk(K_HANDLE, h));
   }
@@ -4421,4 +4428,482 @@ void d_sandbox(int bits) {
   if (getenv("DRIFT_SANDBOX_REPORT")) sb_report(bits, fs ? 2 : ll, sc);
   if (ll < 0 || sc < 0 || (strict && (ll == 0 || sc == 0)))
     panicf("cannot apply the sandbox (landlock %s, seccomp %s); set DRIFT_SANDBOX=off to run unrestricted", sb_state(ll), sb_state(sc));
+}
+
+/* ------------------------------------------------------------------ db
+   SQLite (libsqlite3.so.0) and PostgreSQL (libpq.so.5), both loaded with dlopen on first use so that
+   programs without `db` carry no dependency. One statement per call, `$n` placeholders, text results
+   for Postgres (parsed per target type), typed results for SQLite. */
+
+static struct {
+  int tried; char err[256];
+  int (*open_v2)(const char*, void**, int, const char*);
+  int (*close_v2)(void*);
+  int (*prepare_v2)(void*, const char*, int, void**, const char**);
+  int (*step)(void*);
+  int (*finalize)(void*);
+  int (*bind_int64)(void*, int, int64_t);
+  int (*bind_double)(void*, int, double);
+  int (*bind_text)(void*, int, const char*, int, void (*)(void*));
+  int (*bind_blob)(void*, int, const void*, int, void (*)(void*));
+  int (*bind_null)(void*, int);
+  int (*bind_count)(void*);
+  const char* (*bind_name)(void*, int);
+  int (*col_count)(void*);
+  const char* (*col_name)(void*, int);
+  int (*col_type)(void*, int);
+  int64_t (*col_int64)(void*, int);
+  double (*col_double)(void*, int);
+  const unsigned char* (*col_text)(void*, int);
+  const void* (*col_blob)(void*, int);
+  int (*col_bytes)(void*, int);
+  int (*changes)(void*);
+  const char* (*errmsg)(void*);
+  int (*ext_errcode)(void*);
+  int (*exec)(void*, const char*, void*, void*, char**);
+  void (*free)(void*);
+  int (*busy_timeout)(void*, int);
+} sq;
+
+static struct {
+  int tried; char err[256];
+  void* (*connectdb)(const char*);
+  int (*status)(const void*);
+  char* (*errmsg)(const void*);
+  void (*finish)(void*);
+  int (*set_encoding)(void*, const char*);
+  void* (*exec_params)(void*, const char*, int, const unsigned int*, const char* const*, const int*, const int*, int);
+  void* (*exec)(void*, const char*);
+  int (*res_status)(const void*);
+  char* (*res_field)(const void*, int);
+  char* (*res_errmsg)(const void*);
+  void (*clear)(void*);
+  int (*ntuples)(const void*);
+  int (*nfields)(const void*);
+  char* (*fname)(const void*, int);
+  unsigned int (*ftype)(const void*, int);
+  int (*isnull)(const void*, int, int);
+  char* (*getvalue)(const void*, int, int);
+  int (*getlength)(const void*, int, int);
+  char* (*cmd_tuples)(void*);
+  void* (*set_notice)(void*, void (*)(void*, const char*), void*);
+} pq;
+static void pq_quiet(void* arg, const char* msg) { (void)arg; (void)msg; }
+
+static int sq_load(void) {
+  if (sq.tried) return sq.err[0] == 0;
+  sq.tried = 1;
+  void* h = dlopen("libsqlite3.so.0", RTLD_NOW | RTLD_LOCAL);
+  if (!h) { snprintf(sq.err, sizeof sq.err, "SQLite needs libsqlite3.so.0: %s", dlerror()); return 0; }
+#define SYM(field, name) if (!(*(void**)&sq.field = dlsym(h, name))) { snprintf(sq.err, sizeof sq.err, "libsqlite3 is missing %s", name); return 0; }
+  SYM(open_v2, "sqlite3_open_v2") SYM(close_v2, "sqlite3_close_v2") SYM(prepare_v2, "sqlite3_prepare_v2") SYM(step, "sqlite3_step")
+  SYM(finalize, "sqlite3_finalize") SYM(bind_int64, "sqlite3_bind_int64") SYM(bind_double, "sqlite3_bind_double")
+  SYM(bind_text, "sqlite3_bind_text") SYM(bind_blob, "sqlite3_bind_blob") SYM(bind_null, "sqlite3_bind_null")
+  SYM(bind_count, "sqlite3_bind_parameter_count") SYM(bind_name, "sqlite3_bind_parameter_name") SYM(col_count, "sqlite3_column_count")
+  SYM(col_name, "sqlite3_column_name") SYM(col_type, "sqlite3_column_type") SYM(col_int64, "sqlite3_column_int64")
+  SYM(col_double, "sqlite3_column_double") SYM(col_text, "sqlite3_column_text") SYM(col_blob, "sqlite3_column_blob")
+  SYM(col_bytes, "sqlite3_column_bytes") SYM(changes, "sqlite3_changes") SYM(errmsg, "sqlite3_errmsg")
+  SYM(ext_errcode, "sqlite3_extended_errcode") SYM(exec, "sqlite3_exec") SYM(free, "sqlite3_free") SYM(busy_timeout, "sqlite3_busy_timeout")
+#undef SYM
+  return 1;
+}
+static int pq_load(void) {
+  if (pq.tried) return pq.err[0] == 0;
+  pq.tried = 1;
+  void* h = dlopen("libpq.so.5", RTLD_NOW | RTLD_LOCAL);
+  if (!h) { snprintf(pq.err, sizeof pq.err, "PostgreSQL needs libpq.so.5: %s", dlerror()); return 0; }
+#define SYM(field, name) if (!(*(void**)&pq.field = dlsym(h, name))) { snprintf(pq.err, sizeof pq.err, "libpq is missing %s", name); return 0; }
+  SYM(connectdb, "PQconnectdb") SYM(status, "PQstatus") SYM(errmsg, "PQerrorMessage") SYM(finish, "PQfinish")
+  SYM(set_encoding, "PQsetClientEncoding") SYM(exec_params, "PQexecParams") SYM(exec, "PQexec") SYM(res_status, "PQresultStatus")
+  SYM(res_field, "PQresultErrorField") SYM(res_errmsg, "PQresultErrorMessage") SYM(clear, "PQclear") SYM(ntuples, "PQntuples")
+  SYM(nfields, "PQnfields") SYM(fname, "PQfname") SYM(ftype, "PQftype") SYM(isnull, "PQgetisnull") SYM(getvalue, "PQgetvalue")
+  SYM(getlength, "PQgetlength") SYM(cmd_tuples, "PQcmdTuples") SYM(set_notice, "PQsetNoticeProcessor")
+#undef SYM
+  return 1;
+}
+
+static void db_close(DHandle* h) {
+  if (h->db) { if (h->dbk == 1) sq.close_v2(h->db); else pq.finish(h->db); }
+  h->db = NULL;
+}
+
+static V db_err(const char* code, const char* fmt, ...) {
+  char msg[1024];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(msg, sizeof msg, fmt, ap);
+  va_end(ap);
+  size_t n = strlen(msg);
+  while (n && (msg[n - 1] == '\n' || msg[n - 1] == ' ')) msg[--n] = 0;
+  V f[2] = {str_from(K_STR, msg, (int64_t)n), str_from(K_STR, code, (int64_t)strlen(code))};
+  return d_err(d_adt(&d_td_db_DbError, 0, 2, f));
+}
+/* SQLite extended result code -> SQLSTATE, so callers test one code for both backends */
+static const char* sq_state(int ext) {
+  switch (ext) {
+  case 1555: case 2067: return "23505";  /* PRIMARYKEY, UNIQUE */
+  case 1299: return "23502";             /* NOTNULL */
+  case 787: return "23503";              /* FOREIGNKEY */
+  case 275: return "23514";              /* CHECK */
+  }
+  switch (ext & 0xff) {
+  case 1: return "42000";   /* SQLITE_ERROR: syntax, missing table... */
+  case 5: case 6: return "55P03";  /* BUSY, LOCKED */
+  case 14: return "08000";  /* CANTOPEN */
+  case 19: return "23000";
+  default: return "HY000";
+  }
+}
+static V sq_fail(DHandle* h) { return db_err(sq_state(sq.ext_errcode(h->db)), "%s", sq.errmsg(h->db)); }
+static V pq_fail_res(void* res) {
+  const char* state = pq.res_field(res, 'C');
+  const char* m = pq.res_field(res, 'M');
+  const char* det = pq.res_field(res, 'D');
+  V e = m ? db_err(state ? state : "HY000", "%s%s%s", m, det ? ": " : "", det ? det : "")
+          : db_err(state ? state : "08000", "%s", pq.res_errmsg(res));
+  pq.clear(res);
+  return e;
+}
+
+V d_n_db_open(V url) {
+  const char* u = S(url)->p;
+  V r;
+  int pg = !strncmp(u, "postgres://", 11) || !strncmp(u, "postgresql://", 13);
+  if (!pg && !strncmp(u, "sqlite:", 7)) u += 7;
+  if (pg ? !pq_load() : !sq_load()) { r = db_err("08000", "%s", pg ? pq.err : sq.err); d_release(url); return r; }
+  DHandle* h = newobj(sizeof(DHandle));
+  h->fd = -1;
+  h->path = strdup(u);
+  h->dbk = pg ? 2 : 1;
+  h->db = NULL;
+  r = mk(K_HANDLE, h);
+  if (pg) {
+    h->db = pq.connectdb(u);
+    if (!h->db || pq.status(h->db) != 0) {
+      V e = db_err("08000", "%s", h->db ? pq.errmsg(h->db) : "out of memory");
+      d_release(r); d_release(url); return e;
+    }
+    pq.set_encoding(h->db, "UTF8");
+    pq.set_notice(h->db, pq_quiet, NULL);  /* NOTICEs (e.g. DROP ... IF EXISTS) are not errors */
+    /* hide the password in `show` */
+    char* at = strchr(h->path, '@');
+    char* co = strstr(h->path, "://");
+    if (at && co) { char* pw = memchr(co + 3, ':', (size_t)(at - co - 3)); if (pw) memmove(pw, at, strlen(at) + 1); }
+  } else {
+    int rc = sq.open_v2(u, &h->db, 2 | 4 | 0x40 /* READWRITE | CREATE | URI */, NULL);
+    if (rc != 0) {
+      V e = h->db ? db_err("08000", "%s: %s", u, sq.errmsg(h->db)) : db_err("08000", "%s: out of memory", u);
+      d_release(r); d_release(url); return e;
+    }
+    sq.busy_timeout(h->db, 5000);
+    sq.exec(h->db, "PRAGMA foreign_keys = ON", NULL, NULL, NULL);
+  }
+  d_release(url);
+  return d_ok(r);
+}
+V d_n_db_Conn_backend(V c) {
+  V r = d_str_new(H(c)->dbk == 1 ? "sqlite" : "postgres", H(c)->dbk == 1 ? 6 : 8);
+  d_release(c);
+  return r;
+}
+
+/* ---- parameters */
+typedef struct DbParam { int kind; /* 0 null 1 int 2 float 3 bool 4 text 5 blob */ int64_t i; double f; const char* p; int64_t n; } DbParam;
+static void db_param_of(V v, DbParam* p) {
+  while (v.k == K_ADT && A(v)->t == &d_td_core_Option) {
+    if (A(v)->tag == 1) { p->kind = 0; return; }
+    v = A(v)->f[0];
+  }
+  switch (v.k) {
+  case K_INT: p->kind = 1; p->i = v.i; break;
+  case K_FLOAT: p->kind = 2; p->f = v.f; break;
+  case K_BOOL: p->kind = 3; p->i = v.i; break;
+  case K_STR: p->kind = 4; p->p = S(v)->p; p->n = S(v)->len; break;
+  case K_BYTES: p->kind = 5; p->p = S(v)->p; p->n = S(v)->len; break;
+  default: p->kind = 0; break;   /* rejected by the checker */
+  }
+}
+/* params borrow from `v`, which the caller keeps alive */
+static int db_params(V v, DbParam* ps, int max) {
+  if (v.k == K_UNIT) return 0;
+  if (v.k == K_TUPLE) {
+    int n = (int)T(v)->n;
+    if (n > max) return -1;
+    for (int i = 0; i < n; i++) db_param_of(T(v)->items[i], &ps[i]);
+    return n;
+  }
+  db_param_of(v, &ps[0]);
+  return 1;
+}
+#define DB_MAX_PARAMS 64
+
+static V sq_prepare(DHandle* h, V sql, const DbParam* ps, int np, void** out) {
+  const char* tail = NULL;
+  void* st = NULL;
+  if (S(sql)->len > 0x7fffffff) return db_err("42000", "statement too long");
+  if (sq.prepare_v2(h->db, S(sql)->p, (int)S(sql)->len, &st, &tail) != 0) return sq_fail(h);
+  if (!st) return db_err("42000", "empty statement");
+  for (const char* t = tail; t && *t; t++) {
+    if (!isspace((unsigned char)*t) && *t != ';') { sq.finalize(st); return db_err("42000", "one statement per call; use `exec_script` for several"); }
+  }
+  int nb = sq.bind_count(st), maxk = 0;
+  for (int j = 1; j <= nb; j++) {
+    const char* nm = sq.bind_name(st, j);
+    char* end = NULL;
+    long k = nm && nm[0] == '$' ? strtol(nm + 1, &end, 10) : 0;
+    if (k < 1 || !end || *end || k > np) {
+      sq.finalize(st);
+      if (k > np) return db_err("42000", "the statement uses $%ld but %d parameter(s) were given", k, np);
+      return db_err("42000", "use $1, $2, ... placeholders (found `%s`)", nm ? nm : "?");
+    }
+    if (k > maxk) maxk = (int)k;
+    const DbParam* p = &ps[k - 1];
+    int rc;
+    switch (p->kind) {
+    case 1: case 3: rc = sq.bind_int64(st, j, p->i); break;
+    case 2: rc = sq.bind_double(st, j, p->f); break;
+    case 4: rc = sq.bind_text(st, j, p->p, (int)p->n, (void (*)(void*))-1); break;
+    case 5: rc = sq.bind_blob(st, j, p->p, (int)p->n, (void (*)(void*))-1); break;
+    default: rc = sq.bind_null(st, j); break;
+    }
+    if (rc != 0) { V e = sq_fail(h); sq.finalize(st); return e; }
+  }
+  if (maxk != np) { sq.finalize(st); return db_err("42000", "%d parameter(s) were given but the statement uses %d", np, maxk); }
+  *out = st;
+  return D_UNIT;
+}
+
+static V pq_run(DHandle* h, V sql, const DbParam* ps, int np, void** out) {
+  const char* vals[DB_MAX_PARAMS];
+  int lens[DB_MAX_PARAMS], fmts[DB_MAX_PARAMS];
+  unsigned int types[DB_MAX_PARAMS];
+  char nums[DB_MAX_PARAMS][32];
+  for (int i = 0; i < np; i++) {
+    const DbParam* p = &ps[i];
+    lens[i] = 0; fmts[i] = 0; types[i] = 0; vals[i] = nums[i];
+    switch (p->kind) {
+    case 0: vals[i] = NULL; break;
+    case 1: snprintf(nums[i], 32, "%lld", (long long)p->i); types[i] = 20; break;
+    case 2:
+      if (isnan(p->f)) strcpy(nums[i], "NaN");
+      else if (isinf(p->f)) strcpy(nums[i], p->f > 0 ? "Infinity" : "-Infinity");
+      else snprintf(nums[i], 32, "%.17g", p->f);
+      types[i] = 701; break;
+    case 3: strcpy(nums[i], p->i ? "t" : "f"); types[i] = 16; break;
+    case 4:
+      if (memchr(p->p, 0, (size_t)p->n)) return db_err("42000", "parameter $%d contains a NUL character, which PostgreSQL text cannot hold", i + 1);
+      vals[i] = p->p; break;   /* DStr data is NUL-terminated */
+    case 5: vals[i] = p->p; lens[i] = (int)p->n; fmts[i] = 1; types[i] = 17; break;
+    }
+  }
+  void* res = pq.exec_params(h->db, S(sql)->p, np, types, vals, lens, fmts, 0);
+  if (!res) return db_err("08000", "%s", pq.errmsg(h->db));
+  int st = pq.res_status(res);
+  if (st != 1 && st != 2) return pq_fail_res(res);  /* COMMAND_OK, TUPLES_OK */
+  *out = res;
+  return D_UNIT;
+}
+
+/* ---- cells and rows */
+typedef struct DbRow {
+  DHandle* h; void* st; void* res; int row, ncols;
+} DbRow;
+static const char* row_colname(const DbRow* r, int c) { return r->h->dbk == 1 ? sq.col_name(r->st, c) : pq.fname(r->res, c); }
+static int row_isnull(const DbRow* r, int c) { return r->h->dbk == 1 ? sq.col_type(r->st, c) == 5 : pq.isnull(r->res, r->row, c); }
+
+static const char* const int_names[] = {"Int", "I32", "U8", "U32", "U64"};
+
+/* 1 ok; 0 with err filled */
+static int db_cell(const DbRow* r, int c, const DTy* t, V* out, char* err, size_t en) {
+  const char* cn = row_colname(r, c);
+  if (t->k == K_ADT && t->t == &d_td_core_Option) {
+    if (row_isnull(r, c)) { *out = d_none(); return 1; }
+    V x;
+    if (!db_cell(r, c, t->vf[0][0], &x, err, en)) return 0;
+    *out = d_some(x);
+    return 1;
+  }
+  if (row_isnull(r, c)) { snprintf(err, en, "column `%s` is NULL; declare it as an Option", cn); return 0; }
+  int sqk = r->h->dbk == 1 ? sq.col_type(r->st, c) : 3;  /* 1 int 2 float 3 text 4 blob */
+  const char* txt = NULL; int64_t tn = 0; unsigned int oid = 0;
+  if (r->h->dbk == 2) { txt = pq.getvalue(r->res, r->row, c); tn = pq.getlength(r->res, r->row, c); oid = pq.ftype(r->res, c); }
+  static const char* const sqnames[] = {"", "an integer", "a real", "text", "a blob"};
+  switch (t->k) {
+  case K_INT: {
+    int64_t v;
+    if (r->h->dbk == 1) {
+      if (sqk != 1) { snprintf(err, en, "column `%s` is %s, expected Int", cn, sqnames[sqk]); return 0; }
+      v = sq.col_int64(r->st, c);
+    } else {
+      char* end; errno = 0;
+      long long x = strtoll(txt, &end, 10);
+      if (!tn || *end || errno) { snprintf(err, en, "column `%s` holds `%.40s`, expected Int", cn, txt); return 0; }
+      v = x;
+    }
+    int ok = t->num == 0 || (t->num == 1 && v >= INT32_MIN && v <= INT32_MAX) || (t->num == 2 && v >= 0 && v <= 255) ||
+             (t->num == 3 && v >= 0 && v <= 4294967295LL) || (t->num == 4 && v >= 0);
+    if (!ok) { snprintf(err, en, "column `%s` holds %lld, out of range for %s", cn, (long long)v, int_names[t->num]); return 0; }
+    *out = d_int(v);
+    return 1;
+  }
+  case K_FLOAT: {
+    double f;
+    if (r->h->dbk == 1) {
+      if (sqk != 1 && sqk != 2) { snprintf(err, en, "column `%s` is %s, expected Float", cn, sqnames[sqk]); return 0; }
+      f = sq.col_double(r->st, c);
+    } else {
+      char* end;
+      f = strtod(txt, &end);
+      if (!tn || *end) { snprintf(err, en, "column `%s` holds `%.40s`, expected Float", cn, txt); return 0; }
+    }
+    *out = d_float(t->num ? (double)(float)f : f);
+    return 1;
+  }
+  case K_BOOL:
+    if (r->h->dbk == 1) {
+      int64_t v = sqk == 1 ? sq.col_int64(r->st, c) : -1;
+      if (v != 0 && v != 1) { snprintf(err, en, "column `%s` is not 0 or 1, expected Bool", cn); return 0; }
+      *out = d_bool((int)v);
+    } else {
+      if (oid != 16) { snprintf(err, en, "column `%s` holds `%.40s`, expected Bool", cn, txt); return 0; }
+      *out = d_bool(txt[0] == 't');
+    }
+    return 1;
+  case K_STR:
+    if (r->h->dbk == 1) {
+      if (sqk == 4) { snprintf(err, en, "column `%s` is a blob; use Bytes", cn); return 0; }
+      const char* p = (const char*)sq.col_text(r->st, c);
+      txt = p ? p : "";
+      tn = sq.col_bytes(r->st, c);
+    } else if (oid == 17) { snprintf(err, en, "column `%s` is bytea; use Bytes", cn); return 0; }
+    if (!utf8_valid(txt, tn)) { snprintf(err, en, "column `%s` is not valid UTF-8; use Bytes", cn); return 0; }
+    *out = str_from(K_STR, txt, tn);
+    return 1;
+  case K_BYTES:
+    if (r->h->dbk == 1) {
+      const char* p = sqk == 4 ? sq.col_blob(r->st, c) : (const char*)sq.col_text(r->st, c);
+      int64_t n = sq.col_bytes(r->st, c);
+      *out = str_from(K_BYTES, p ? p : "", n);
+    } else if (oid == 17 && tn >= 2 && txt[0] == '\\' && txt[1] == 'x' && tn % 2 == 0) {
+      DBuf b; d_buf_init(&b);
+      for (int64_t i = 2; i < tn; i += 2) { int hi = hexv(txt[i]), lo = hexv(txt[i + 1]);
+        if (hi < 0 || lo < 0) break;
+        char ch = (char)(hi * 16 + lo); d_buf_add(&b, &ch, 1); }
+      *out = buf_done_kind(&b, K_BYTES);
+    } else *out = str_from(K_BYTES, txt, tn);
+    return 1;
+  default:
+    snprintf(err, en, "unsupported column type");
+    return 0;
+  }
+}
+static int ty_is_cell(const DTy* t) { return t->k != K_TUPLE && !(t->k == K_ADT && t->t != &d_td_core_Option); }
+static void cols_list(const DbRow* r, char* out, size_t n) {
+  out[0] = 0;
+  for (int c = 0; c < r->ncols && strlen(out) + 40 < n; c++) { if (c) strcat(out, ", "); strncat(out, row_colname(r, c), 32); }
+}
+static int db_row(const DbRow* r, const DTy* t, V* out, char* err, size_t en) {
+  if (ty_is_cell(t)) {
+    if (r->ncols != 1) { snprintf(err, en, "the row type is one value but the query returns %d columns", r->ncols); return 0; }
+    return db_cell(r, 0, t, out, err, en);
+  }
+  if (t->k == K_TUPLE) {
+    if (r->ncols != t->n) { snprintf(err, en, "the row type has %lld values but the query returns %d columns", (long long)t->n, r->ncols); return 0; }
+    V items[64];
+    if (t->n > 64) { snprintf(err, en, "too many columns"); return 0; }
+    for (int64_t i = 0; i < t->n; i++) if (!db_cell(r, (int)i, t->a[i], &items[i], err, en)) { release_all(items, i); return 0; }
+    *out = d_tuple(t->n, items);
+    return 1;
+  }
+  const DVariant* var = &t->t->v[0];
+  V f[64];
+  if (var->n > 64) { snprintf(err, en, "too many fields"); return 0; }
+  for (int j = 0; j < var->n; j++) {
+    const DTy* ft = t->vf[0][j];
+    int col = -1;
+    for (int c = 0; c < r->ncols; c++) if (!strcmp(row_colname(r, c), var->fields[j])) { col = c; break; }
+    if (col < 0) {
+      if (ft->k == K_ADT && ft->t == &d_td_core_Option) { f[j] = d_none(); continue; }
+      char cols[400];
+      cols_list(r, cols, sizeof cols);
+      snprintf(err, en, "no column `%s` for field `%s.%s` (columns: %s)", var->fields[j], t->t->name, var->fields[j], cols);
+      release_all(f, j);
+      return 0;
+    }
+    if (!db_cell(r, col, ft, &f[j], err, en)) { release_all(f, j); return 0; }
+  }
+  *out = d_adt(t->t, 0, var->n, f);
+  return 1;
+}
+
+/* mode 0 exec (returns Int), 1 query (List), 2 query_one (Option) */
+static V db_run(V conn, V sql, V params, const DTy* ty, int mode) {
+  DHandle* h = H(conn);
+  DbParam ps[DB_MAX_PARAMS];
+  int np = db_params(params, ps, DB_MAX_PARAMS);
+  V r;
+  char err[600];
+  if (np < 0) { r = db_err("42000", "at most %d parameters", DB_MAX_PARAMS); goto done; }
+  if (!h->db) { r = db_err("08000", "the connection is closed"); goto done; }
+  if (h->dbk == 1) {
+    void* st = NULL;
+    r = sq_prepare(h, sql, ps, np, &st);
+    if (r.k != K_UNIT) goto done;
+    DbRow row = {h, st, NULL, 0, sq.col_count(st)};
+    V list = mode == 1 ? list_new(8) : D_UNIT;
+    V one = D_UNIT; int got = 0, rc;
+    while ((rc = sq.step(st)) == 100) {
+      if (mode == 0) continue;
+      if (mode == 2 && got) { d_release(one); r = db_err("21000", "`query_one` expected at most one row, got more"); sq.finalize(st); goto done; }
+      V x;
+      if (!db_row(&row, ty, &x, err, sizeof err)) { d_release(list); if (got) d_release(one); r = db_err("22000", "row %d: %s", row.row + 1, err); sq.finalize(st); goto done; }
+      if (mode == 1) lpush(list, x); else one = x;
+      got = 1; row.row++;
+    }
+    if (rc != 101) { d_release(list); if (got) d_release(one); r = sq_fail(h); sq.finalize(st); goto done; }
+    sq.finalize(st);
+    r = d_ok(mode == 0 ? d_int(sq.changes(h->db)) : mode == 1 ? list : got ? d_some(one) : d_none());
+  } else {
+    void* res = NULL;
+    r = pq_run(h, sql, ps, np, &res);
+    if (r.k != K_UNIT) goto done;
+    if (mode == 0) { r = d_ok(d_int(atoll(pq.cmd_tuples(res)))); pq.clear(res); goto done; }
+    int nt = pq.ntuples(res);
+    if (mode == 2 && nt > 1) { pq.clear(res); r = db_err("21000", "`query_one` expected at most one row, got %d", nt); goto done; }
+    DbRow row = {h, NULL, res, 0, pq.nfields(res)};
+    V list = list_new(nt);
+    for (; row.row < nt; row.row++) {
+      V x;
+      if (!db_row(&row, ty, &x, err, sizeof err)) { d_release(list); r = db_err("22000", "row %d: %s", row.row + 1, err); pq.clear(res); goto done; }
+      lpush(list, x);
+    }
+    pq.clear(res);
+    if (mode == 1) r = d_ok(list);
+    else { r = d_ok(nt ? d_some(d_retain(L(list)->items[0])) : d_none()); d_release(list); }
+  }
+done:
+  d_release(conn); d_release(sql); d_release(params);
+  return r;
+}
+V d_n_db_Conn_exec(V c, V sql, V params) { return db_run(c, sql, params, NULL, 0); }
+V d_n_db_Conn_query(V c, V sql, V params, const DTy* ty) { return db_run(c, sql, params, ty, 1); }
+V d_n_db_Conn_query_one(V c, V sql, V params, const DTy* ty) { return db_run(c, sql, params, ty, 2); }
+V d_n_db_Conn_exec_script(V c, V sql) {
+  DHandle* h = H(c);
+  V r = d_ok(D_UNIT);
+  if (!h->db) r = db_err("08000", "the connection is closed");
+  else if (h->dbk == 1) {
+    char* msg = NULL;
+    if (sq.exec(h->db, S(sql)->p, NULL, NULL, &msg) != 0) { r = db_err(sq_state(sq.ext_errcode(h->db)), "%s", msg ? msg : sq.errmsg(h->db)); }
+    if (msg) sq.free(msg);
+  } else {
+    void* res = pq.exec(h->db, S(sql)->p);
+    if (!res) r = db_err("08000", "%s", pq.errmsg(h->db));
+    else {
+      int st = pq.res_status(res);
+      if (st != 0 && st != 1 && st != 2) r = pq_fail_res(res); else pq.clear(res);
+    }
+  }
+  d_release(c); d_release(sql);
+  return r;
 }

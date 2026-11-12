@@ -22,7 +22,8 @@ typedef struct DType { const char* name; int32_t nv; const DVariant* v; int32_t 
 typedef struct DAdt { DObj h; DType* t; int32_t tag, n; V f[]; } DAdt;
 typedef struct DFn { DObj h; V (*code)(struct DFn*, V*); int32_t arity, nenv; V env[]; } DFn;
 typedef struct DRange { DObj h; int64_t lo, hi; } DRange;
-typedef struct DHandle { DObj h; int fd; char* path; } DHandle;
+/* fd >= 0: a file. db: a database connection (dbk 1 SQLite, 2 PostgreSQL). */
+typedef struct DHandle { DObj h; int fd; char* path; int dbk; void* db; } DHandle;
 typedef struct DTask { DObj h; V val; } DTask;
 typedef struct DChan { DObj h; DList* q; int64_t head; } DChan;
 typedef struct DBuf { char* p; int64_t len, cap; } DBuf;
@@ -39,7 +40,7 @@ extern int d_loc_line;
 
 extern DType d_td_core_Option, d_td_core_Result, d_td_core_Error, d_td_fs_IoError, d_td_fs_Mode,
     d_td_http_HttpError, d_td_http_Request, d_td_http_Response, d_td_json_JsonError,
-    d_td_re_Regex, d_td_re_RegexError, d_td_re_Match, d_td_html_Document, d_td_html_Node;
+    d_td_re_Regex, d_td_re_RegexError, d_td_re_Match, d_td_html_Document, d_td_html_Node, d_td_db_DbError;
 
 _Noreturn void d_panic_c(const char* msg);
 _Noreturn void d_panic_v(V msg);

@@ -177,6 +177,8 @@ Every std module is always in scope (`io.println`, `fs.read_str`, `http.get`, `j
 `io fs net http json str list map set math time rand env proc db (sqlite, postgres) re (regex) html (parse, select) bytes hash (sha256, fnv) log`
 - `env.args()` starts with the program name: the first argument is `env.args().get(1)`.
 - `json.decode` needs the target type at the call: `let o: Offer = json.decode(text)?` or `json.decode[List[Offer]](text)?`.
+- `env.get("NAME")` → `Option[Str]`.
+- `db.open(":memory:" | "file.db" | "postgres://user@host/db")?`, then `c.exec(sql, params)?` (rows changed), `c.query[Row](sql, params)?` → `List[Row]`, `c.query_one[Row](sql, params)?` → `Option[Row]` (`Err` if several), `c.exec_script(sql)?` for several statements. Placeholders are `$1, $2` on both backends; `params` is `()`, one value or a tuple `(id, name)`. `Row` is a struct (fields matched to columns by name), a tuple (by position) or one value; columns are Int/Float/Bool/Str/Bytes, NULL needs `Option`. `e.code` is the SQLSTATE on both backends (`"23505"` unique violation).
 - `http.get`/`http.post` follow redirects and return `Err` (with `.status`) for status >= 400; `http.request(method, url, headers, body)` returns any status. `.text()` honors the response charset.
 - `re.compile(r"(\d+)-(\d+)")?` then `.find`, `.find_all`, `.is_match`, `.replace_all(text, "$2/$1")`, `.split`; `Match` has `text`, `start`, `end` (character indices) and `groups: List[Option[Str]]`. Linear time; no backreferences or lookaround.
 - `html.parse(src).select("ul#list > li.item:not(.agotado)")` → `List[html.Node]`; a node has `.text()` (whitespace collapsed), `.attr("href")`, `.attrs()`, `.tag()`, `.html()`, `.inner_html()`, `.children()`, `.parent()`, `.select(css)`, `.select_first(css)`.

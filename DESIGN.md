@@ -77,9 +77,11 @@ field indices, how `?` converts an error, which variant a pattern names); the ge
 - `drift test` forks one process per `examples`/`test` block and captures its stderr; holes panic only when reached.
 - The runtime object and program binaries are cached by content hash in `~/.cache/drift`.
 - Checked in CI-style runs with AddressSanitizer + UBSan + LeakSanitizer (`DRIFT_CFLAGS`).
-Reified generics: `json.decode[T]` is the one generic whose type must exist at run time. The checker records the
-concrete `T` of each call (E0803 if it is unknown, a type parameter, a function or an opaque handle) and the
-generator passes a static `DTy` descriptor; every other generic stays erased.
+Reified generics: `json.decode[T]` and `db` `query[T]`/`query_one[T]` are the generics whose type must exist at
+run time. The checker records the concrete `T` of each call (E0803/E0804 if it is unknown, a type parameter, a
+function, an opaque handle or, for rows, not made of column values) and the generator passes a static `DTy`
+descriptor; every other generic stays erased. SQL parameters are checked (E0805) but read from the values.
+Explicit type arguments also work on methods: `conn.query[(Str, Int)](sql, ())`.
 JSON mapping: numbers, Bool, Str; Bytes as base64; `()`/`None` as null and `Some(x)` as `x`; List/Set/tuple as
 arrays; `Map[Str, V]` as an object, other maps as `[[k, v], ...]`; structs as objects (a missing `Option` field
 decodes as `None`, unknown keys are ignored); unit variants as `"Name"`, others as `{"Name": fields}`;
@@ -88,6 +90,15 @@ HTTP: HTTP/1.1 on plain sockets (connect 15 s, I/O 30 s timeouts, chunked, up to
 TLS uses the system OpenSSL 3 through `dlopen` on the first https URL, with peer and hostname verification and
 TLS >= 1.2, so `drift build` output still has no link-time dependency. `http.serve` handles one request per
 connection, sequentially until phase 5 (10 s I/O timeout, 64 KiB headers, 16 MiB bodies, UTF-8 checked).
+DB: SQLite (`libsqlite3.so.0`) and PostgreSQL (`libpq.so.5`) are loaded with `dlopen` on the first `db.open`,
+so binaries keep no link-time dependency. One statement per `exec`/`query` (SQLite rejects trailing ones), `$n`
+placeholders bound by number on both (SQLite checks every `$n` <= the parameter count and that all are used).
+Postgres runs `PQexecParams` with text results parsed per target type (Int as int8, Float float8, Bool, Bytes as
+binary bytea; Str parameters are untyped so the server infers them), client encoding UTF8, NOTICEs dropped.
+SQLite opens with foreign keys on and a 5 s busy timeout; its constraint errors map to the Postgres SQLSTATEs.
+Row decoding: struct fields by column name (a missing `Option` field is `None`), tuples by position, one value
+needs one column; NULL into a non-Option, wrong types, out-of-range ints and invalid UTF-8 are `Err` with the row
+and column. `tests/programs/db.dr` gives byte-identical output on both backends.
 Regex: own engine (pattern → AST → instructions kept in a Bytes value → Pike VM over UTF-8), leftmost-first
 like Perl/RE2, linear in the text, so no pattern can hang a program (`(a+)+$` on 5000 chars runs in
 microseconds). No backreferences or lookaround: they are rejected with a reason. Case folding is simple

@@ -389,7 +389,7 @@ impl<'p> Gen<'p> {
     }
     fn is_reified(&self, fid: usize) -> bool {
         let f = &self.p.fns[fid];
-        f.name == "decode" && self.p.mods[f.module].path == "std.json"
+        matches!((self.p.mods[f.module].path.as_str(), f.name.as_str()), ("std.json", "decode") | ("std.db", "query") | ("std.db", "query_one"))
     }
     fn fn_sig_params(&self, fid: usize, named: bool) -> String {
         let mut ps: Vec<String> = self.p.fns[fid]
@@ -1155,7 +1155,11 @@ impl<'p> Gen<'p> {
         let ExprKind::Call { callee, args } = &e.kind else { unreachable!() };
         match self.note(e.span, b'c') {
             Some(Note::Method(fid)) => {
-                let ExprKind::Field { base, .. } = &callee.kind else { return self.internal("method") };
+                let field = match &callee.kind {
+                    ExprKind::Index { base, .. } => base,
+                    _ => callee,
+                };
+                let ExprKind::Field { base, .. } = &field.kind else { return self.internal("method") };
                 let var_self = self.p.fns[fid].params.first().map_or(false, |p| p.mutable);
                 let mut vs = Vec::new();
                 if var_self {
@@ -1165,6 +1169,9 @@ impl<'p> Gen<'p> {
                 } else {
                     vs.push(self.expr(base));
                     vs.extend(args.iter().map(|a| self.expr(a)));
+                }
+                if let Some(Note::TypeArg(t)) = self.note(e.span, b'g') {
+                    vs.push(format!("&{}", self.ty_desc(&t)));
                 }
                 let name = self.fn_cname(fid);
                 return self.call_tmp(format!("{}({})", name, vs.join(", ")));

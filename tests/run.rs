@@ -16,7 +16,7 @@ fn read(path: &str) -> String {
 
 #[test]
 fn golden_programs() {
-    for (name, code) in [("values", 0), ("closures", 0), ("control", 0), ("errors", 1), ("json", 0), ("regex", 0), ("html", 0)] {
+    for (name, code) in [("values", 0), ("closures", 0), ("control", 0), ("errors", 1), ("json", 0), ("regex", 0), ("html", 0), ("db", 0)] {
         let (out, err, c) = drift(&["run", &format!("tests/programs/{}.dr", name)]);
         assert_eq!(out, read(&format!("tests/programs/{}.out", name)), "{}: stderr:\n{}", name, err);
         assert_eq!(c, code, "{}: {}", name, err);
@@ -175,4 +175,16 @@ fn each_test_block_gets_its_own_sandbox() {
     let (out, err, c) = drift(&["test", "tests/programs/sandbox.dr"]);
     assert_eq!(c, 0, "{}\n{}", out, err);
     assert!(out.contains("3 passed, 0 failed"), "{}", out);
+}
+
+/// The same program against PostgreSQL gives the same output (set DRIFT_TEST_PG to a postgres:// URL).
+#[test]
+fn db_postgres_matches_sqlite() {
+    let Ok(url) = std::env::var("DRIFT_TEST_PG") else {
+        eprintln!("DRIFT_TEST_PG not set: skipping the PostgreSQL run");
+        return;
+    };
+    let (out, err, c) = drift_env(&["run", "tests/programs/db.dr"], &[("DRIFT_DB", url.as_str())]);
+    assert_eq!(c, 0, "{}", err);
+    assert_eq!(out.replace(" postgres\n", " sqlite\n"), read("tests/programs/db.out"));
 }
