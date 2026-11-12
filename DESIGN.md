@@ -48,7 +48,11 @@ and those programs run well on weak hardware.
 3. `drift check --json` → apply every `fix`, read expected types for holes, repeat.
 4. `drift test` → `examples`/contracts tell what is wrong in value terms.
 5. `drift build --release`.
-The `drift mcp` server exposes the same operations as tools so the agent never parses human text.
+The `drift mcp` server exposes the same operations as tools so the agent never parses human text: MCP over stdio
+(JSON-RPC, one message per line), tools `drift_check`/`drift_test`/`drift_run`/`drift_fmt`/`drift_outline`/
+`drift_build`/`drift_card` and the resource `drift://card`. Each tool runs the CLI as a subprocess (own process
+group, killed on timeout), so the server survives anything the program does; a `source` argument is checked in a
+temporary file whose path is reported as `main.dr`. Register it with `claude mcp add drift -- drift mcp`.
 
 ### Diagnostic shape (stable contract)
 ```json

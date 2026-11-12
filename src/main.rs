@@ -15,6 +15,7 @@ usage:
   drift outline <std.module|file>              signatures and types of a module
   drift parse <file> [--ast]                   parse one file; --ast prints the tree
   drift card                                   print the language card
+  drift mcp                                    Model Context Protocol server on stdio (tools: check, test, run, fmt, outline, build, card)
   drift --version";
 
 struct Input {
@@ -358,6 +359,13 @@ fn main() -> ExitCode {
         Some("fmt") => fmt_cmd(&args[1..]),
         Some("outline") => outline_cmd(&args[1..]),
         Some("parse") => parse_cmd(&args[1..]),
+        Some("mcp") => match drift::mcp::serve() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("drift mcp: {}", e);
+                ExitCode::from(1)
+            }
+        },
         Some("card") => {
             print!("{}", drift::CARD);
             ExitCode::SUCCESS

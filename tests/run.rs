@@ -214,3 +214,38 @@ fn eldato_identity_port() {
     assert_eq!(c, 0, "{}\n{}", out, err);
     assert!(out.contains("9 passed, 0 failed"), "{}", out);
 }
+
+/// `drift mcp`: initialize, list tools, check with a fix, run with stdin, a timeout that kills the program.
+#[test]
+fn mcp_server() {
+    use std::io::Write;
+    let msgs = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"drift_check","arguments":{"source":"fn f() -> Bool {\n  !true\n}\n","fix":true}}}"#,
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"drift_run","arguments":{"source":"pub fn main() -> Result[(), Error] uses io {\n  let l = io.read_line().unwrap_or(\"\")\n  io.println(\"<{l}>\")\n  Ok(())\n}\n","stdin":"abc\n"}}}"#,
+        r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"drift_run","arguments":{"source":"pub fn main() -> Result[(), Error] {\n  while true {\n  }\n  Ok(())\n}\n","timeout_ms":500}}}"#,
+        r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"drift_nope","arguments":{}}}"#,
+        "not json",
+    ];
+    let mut child = Command::new(env!("CARGO_BIN_EXE_drift"))
+        .arg("mcp")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all((msgs.join("\n") + "\n").as_bytes()).unwrap();
+    let out = String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap();
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 7, "{}", out);
+    assert!(lines[0].contains(r#""protocolVersion":"2025-06-18""#) && lines[0].contains(r#""name":"drift""#), "{}", lines[0]);
+    for t in ["drift_check", "drift_test", "drift_run", "drift_fmt", "drift_outline", "drift_build", "drift_card"] {
+        assert!(lines[1].contains(&format!(r#""name":"{}""#, t)), "{}", lines[1]);
+    }
+    assert!(lines[2].contains(r#"\"fixed_source\":\"fn f() -> Bool {\\n  not true\\n}\\n\""#) || lines[2].contains(r#""fixed_source":"fn f() -> Bool {\n  not true\n}\n""#), "{}", lines[2]);
+    assert!(lines[3].contains(r#""stdout":"<abc>\n""#) && lines[3].contains(r#""exit_code":0"#), "{}", lines[3]);
+    assert!(lines[4].contains(r#""timed_out":true"#), "{}", lines[4]);
+    assert!(lines[5].contains(r#""code":-32602"#), "{}", lines[5]);
+    assert!(lines[6].contains(r#""code":-32700"#), "{}", lines[6]);
+}

@@ -198,5 +198,5 @@ Every std module is always in scope (`io.println`, `fs.read_str`, `http.get`, `j
 | `drift fmt [--check]` | canonical layout (width 100, 2 spaces); comments and single blank lines are kept |
 | `drift outline <module>` | compact signatures, types and effects of a module |
 | `drift explain <code>` | full explanation of a diagnostic |
-| `drift mcp` | MCP server: check, outline, type_at, references, apply_fix, run_tests |
+| `drift mcp` | MCP server on stdio: `drift_check` (fix), `drift_test`, `drift_run` (stdin, args, timeout), `drift_fmt`, `drift_outline`, `drift_build`, `drift_card`; each takes `path` or `source` |
 | `drift card` | prints this card |

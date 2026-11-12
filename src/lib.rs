@@ -5,7 +5,9 @@ pub mod codegen;
 pub mod diag;
 pub mod driver;
 pub mod fmt;
+pub mod json;
 pub mod lexer;
+pub mod mcp;
 pub mod parser;
 pub mod toolchain;
 
