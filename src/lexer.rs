@@ -504,9 +504,64 @@ impl<'a> Lexer<'a> {
         self.push(Tok::Str(pieces), lo);
     }
 
+    /// Byte index of the `}` closing an interpolation whose expression starts at `i`, stepping over
+    /// nested string literals (which may interpolate too). `None` if it does not close on this line.
+    fn scan_interp(&self, mut i: usize) -> Option<usize> {
+        let b = self.src.as_bytes();
+        let mut depth = 0usize;
+        while i < self.end {
+            match b[i] {
+                b'\n' => return None,
+                b'{' => depth += 1,
+                b'}' if depth == 0 => return Some(i),
+                b'}' => depth -= 1,
+                b'"' if i > 0 && b[i - 1] == b'r' && (i < 2 || !(b[i - 2].is_ascii_alphanumeric() || b[i - 2] == b'_')) => {
+                    i += 1;
+                    while i < self.end && b[i] != b'"' {
+                        if b[i] == b'\n' {
+                            return None;
+                        }
+                        i += 1;
+                    }
+                    if i >= self.end {
+                        return None;
+                    }
+                }
+                b'"' => {
+                    i = self.scan_nested_str(i + 1)?;
+                    continue;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// Index just past the closing quote of a string literal whose body starts at `i`.
+    fn scan_nested_str(&self, mut i: usize) -> Option<usize> {
+        let b = self.src.as_bytes();
+        while i < self.end {
+            match b[i] {
+                b'\n' => return None,
+                b'\\' => i += 2,
+                b'"' => return Some(i + 1),
+                b'{' => i = self.scan_interp(i + 1)? + 1,
+                _ => i += 1,
+            }
+        }
+        None
+    }
+
     /// At `{` inside a string: returns the span of the expression between the braces.
     fn interpolation(&mut self) -> Option<Span> {
         let open = self.pos;
+        if let Some(close) = self.scan_interp(open + 1) {
+            if close > open + 1 {
+                self.pos = close + 1;
+                return Some(Span::new(open + 1, close));
+            }
+        }
         self.pos += 1;
         let start = self.pos;
         let mut depth = 0usize;
@@ -547,7 +602,7 @@ impl<'a> Lexer<'a> {
                     self.diags.push(Diag::error(
                         "L0008",
                         Span::new(self.pos, self.pos + 1),
-                        "string literals are not allowed inside an interpolation; bind the value with `let` first",
+                        "string literal inside this interpolation is not closed on this line",
                     ));
                     self.pos += 1;
                     while self.pos < self.end && self.peek() != b'"' && self.peek() != b'\n' {

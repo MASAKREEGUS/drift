@@ -98,6 +98,15 @@ one Bytes value in document order, so a Node is (Document, index), copying is fr
 contiguous range. `text()` collapses whitespace and separates block elements, like rendered text.
 Both parsers were fuzzed under ASan/UBSan/LeakSanitizer (800 random and adversarial inputs).
 `r"""..."""` raw multi-line strings exist because HTML, JSON, CSS and regexes are this language's daily data.
+Sandbox: generated `main` calls `d_sandbox(effects of main)` before any user code; the test harness does the
+same in each forked block with that block's `uses`. Landlock (when `fs`/`db` are absent) handles every
+filesystem right of the running ABI with no rules, except that `net` keeps certificates, resolver files and
+system libraries readable; OpenSSL is dlopen'ed before the restriction. seccomp checks the audit arch (foreign
+ABIs are killed, x32 gets ENOSYS) and returns EACCES for `socket` without `net`/`db`, for exec/fork/non-thread
+`clone` without `proc` (`clone3` gets ENOSYS so libc falls back), and EPERM for ptrace, bpf, io_uring, mount,
+namespaces, keyrings and modules. Sanitizer builds keep ptrace, plain clone and /proc for LeakSanitizer.
+Kernels without Landlock or seccomp run unrestricted unless `DRIFT_SANDBOX=strict`. `db` currently opens both
+`fs` and `net` (sqlite files, postgres sockets).
 Known limits: `spawn`/`par_map`/channels run sequentially until phase 5; a value leaked on an early `?` exit is reclaimed at process end.
 
 ## 8. Roadmap

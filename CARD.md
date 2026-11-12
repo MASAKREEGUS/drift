@@ -20,7 +20,7 @@ Files end in `.dr`. One file = one module; module path = file path (`src/shop/of
 r"raw, {not} interpolated"     b"bytes"     """multi-line, common indent stripped"""
 r"""raw multi-line: HTML, JSON, CSS, regex as-is; no escapes, no {interpolation}"""
 ```
-Interpolations hold one expression and never contain string literals: bind the value with `let` first.
+Interpolations hold one expression, string literals included: `"{m.get("k").unwrap_or("-")}"`.
 Naming is enforced: `snake_case` for values, functions, fields, modules; `PascalCase` for types and variants; `UPPER_CASE` for consts.
 
 ## Types
@@ -118,7 +118,7 @@ pub fn main() -> Result[(), Error] uses io, net {
 ```
 - Effects: `io` (stdin/stdout/stderr), `fs`, `net`, `db`, `env`, `time`, `rand`, `proc`, `spawn`.
 - A function may call another only if the callee's effects are a subset of its own. Closures inherit the effects of what they call.
-- `main` declares what the program may do; the runtime enforces it (no `net` ⇒ sockets are denied by the OS sandbox).
+- `main` declares what the program may do and the kernel enforces it (Landlock + seccomp): without `fs` no file can be opened, without `net` no socket, without `proc` no exec or fork. Each `test` block runs sandboxed with its own `uses`; `examples` get nothing. `DRIFT_SANDBOX=off` disables it, `DRIFT_SANDBOX_REPORT=1` shows what is enforced.
 
 ## Contracts and examples
 ```

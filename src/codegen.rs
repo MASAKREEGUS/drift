@@ -102,6 +102,11 @@ fn float_lit(s: &str) -> String {
     if t.contains(['.', 'e', 'E']) { t } else { format!("{}.0", t) }
 }
 
+/// Effect bits of a `uses` list (unknown names were already reported by the checker).
+fn effect_bits(uses: &[Ident]) -> u16 {
+    uses.iter().filter_map(|u| crate::check::EFFECTS.iter().position(|e| *e == u.name)).fold(0, |b, i| b | 1 << i)
+}
+
 /// Names of natives defined in the runtime (`V d_n_...(` at the start of a line).
 fn implemented_natives() -> HashSet<String> {
     RT_C.lines()
@@ -151,11 +156,12 @@ pub fn generate(p: &Program, target: &Target) -> String {
                     match &it.kind {
                         ItemKind::Examples { target, cases } => {
                             let f = g.compile_examples(m, cases);
-                            tests.push((format!("examples {}", target.name), f, true, m, g.line(m, it.span.lo)));
+                            tests.push((format!("examples {}", target.name), f, true, m, g.line(m, it.span.lo), 0));
                         }
-                        ItemKind::Test { name, body, .. } => {
+                        ItemKind::Test { name, body, uses } => {
                             let f = g.compile_test(m, body);
-                            tests.push((format!("test {:?}", name), f, false, m, g.line(m, it.span.lo)));
+                            let bits = effect_bits(uses);
+                            tests.push((format!("test {:?}", name), f, false, m, g.line(m, it.span.lo), bits));
                         }
                         _ => {}
                     }
@@ -163,10 +169,10 @@ pub fn generate(p: &Program, target: &Target) -> String {
             }
             let entries: Vec<String> = tests
                 .iter()
-                .map(|(name, f, ex, m, line)| format!("  {{{}, {}, {}, F{}, {}}},", c_str(name.as_bytes()), f, *ex as i32, m, line))
+                .map(|(name, f, ex, m, line, bits)| format!("  {{{}, {}, {}, F{}, {}, {}}},", c_str(name.as_bytes()), f, *ex as i32, m, line, bits))
                 .collect();
             main_code.push_str(&format!(
-                "static const DTest d_tests[] = {{\n{}\n  {{0, 0, 0, 0, 0}}\n}};\n\nint main(int argc, char** argv) {{\n  d_init(argc, argv);\n  d_init_lits();\n  return d_run_tests(d_tests, {}, argc, argv);\n}}\n",
+                "static const DTest d_tests[] = {{\n{}\n  {{0, 0, 0, 0, 0, 0}}\n}};\n\nint main(int argc, char** argv) {{\n  d_init(argc, argv);\n  d_init_lits();\n  return d_run_tests(d_tests, {}, argc, argv);\n}}\n",
                 entries.join("\n"),
                 tests.len()
             ));
@@ -178,8 +184,8 @@ pub fn generate(p: &Program, target: &Target) -> String {
                 _ => false,
             };
             main_code.push_str(&format!(
-                "int main(int argc, char** argv) {{\n  d_init(argc, argv);\n  d_init_lits();\n  V r = f_{}();\n  return d_finish_main(r, {});\n}}\n",
-                main, is_result as i32
+                "int main(int argc, char** argv) {{\n  d_init(argc, argv);\n  d_sandbox({});\n  d_init_lits();\n  V r = f_{}();\n  return d_finish_main(r, {});\n}}\n",
+                info.effects, main, is_result as i32
             ));
         }
     }

@@ -138,3 +138,41 @@ fn http_server_and_client() {
     assert_eq!(c, 0, "{}", err);
     assert_eq!(out, read("tests/programs/http_client.out").replace("8099", &port), "{}", err);
 }
+
+fn drift_env(args: &[&str], env: &[(&str, &str)]) -> (String, String, i32) {
+    let out = Command::new(env!("CARGO_BIN_EXE_drift"))
+        .args(args)
+        .envs(env.iter().copied())
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run drift");
+    (String::from_utf8_lossy(&out.stdout).into(), String::from_utf8_lossy(&out.stderr).into(), out.status.code().unwrap_or(-1))
+}
+
+#[test]
+fn sandbox_follows_main_effects() {
+    let (out, err, c) = drift_env(&["run", "examples/hello.dr"], &[("DRIFT_SANDBOX_REPORT", "1")]);
+    assert_eq!(c, 0, "{}", err);
+    assert_eq!(out, "hola desde Drift\n");
+    if err.contains("landlock=unavailable") {
+        eprintln!("kernel without Landlock: skipping filesystem assertions\n{}", err);
+    } else {
+        assert!(err.contains("read /etc/passwd: Permission denied"), "{}", err);
+        assert!(err.contains("create a file: Permission denied"), "{}", err);
+    }
+    if !err.contains("seccomp=unavailable") {
+        assert!(err.contains("open a socket: Permission denied"), "{}", err);
+        assert!(err.contains("fork: Permission denied"), "{}", err);
+    }
+    // the escape hatch
+    let (_, err, c) = drift_env(&["run", "examples/hello.dr"], &[("DRIFT_SANDBOX", "off"), ("DRIFT_SANDBOX_REPORT", "1")]);
+    assert_eq!(c, 0);
+    assert!(!err.contains("sandbox:"), "{}", err);
+}
+
+#[test]
+fn each_test_block_gets_its_own_sandbox() {
+    let (out, err, c) = drift(&["test", "tests/programs/sandbox.dr"]);
+    assert_eq!(c, 0, "{}\n{}", out, err);
+    assert!(out.contains("3 passed, 0 failed"), "{}", out);
+}

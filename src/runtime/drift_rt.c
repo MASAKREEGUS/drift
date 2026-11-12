@@ -20,6 +20,9 @@
 #include <poll.h>
 #include <dlfcn.h>
 #include <signal.h>
+#include <sys/random.h>
+#include <sys/prctl.h>
+#include <sys/syscall.h>
 
 const char* d_loc_file = "?";
 int d_loc_line = 0;
@@ -867,6 +870,7 @@ int d_run_tests(const DTest* t, int n, int argc, char** argv) {
       close(pfd[0]);
       dup2(pfd[1], 2);
       close(pfd[1]);
+      d_sandbox(t[i].effects);
       V r = t[i].fn();
       int ok;
       if (t[i].is_example) ok = (int)r.i;
@@ -1618,8 +1622,7 @@ V d_n_time_sleep_ms(V ms) {
 static uint64_t rng_state;
 static uint64_t rng(void) {
   if (!rng_state) {
-    int fd = open("/dev/urandom", O_RDONLY);
-    if (fd >= 0) { if (read(fd, &rng_state, 8) != 8) rng_state = 0; close(fd); }
+    if (getrandom(&rng_state, sizeof rng_state, 0) != (ssize_t)sizeof rng_state) rng_state = 0;
     if (!rng_state) rng_state = (uint64_t)time(NULL) ^ ((uint64_t)getpid() << 32) ^ 0x9e3779b97f4a7c15ULL;
   }
   rng_state += 0x9e3779b97f4a7c15ULL;
@@ -4252,4 +4255,170 @@ V d_n_html_Node_parent(V n) {
   V r = p >= 0 ? d_some(node_new(NODE_DOC(n), p)) : d_none();
   d_release(n);
   return r;
+}
+
+/* ------------------------------------------------------------------ sandbox
+   `main` declares what the program may do; the kernel enforces it.
+   - no `fs` (and no `db`): Landlock denies every filesystem access. With `net`, the files TLS and DNS need
+     stay readable (certificates, resolver config, system libraries); OpenSSL is loaded beforehand.
+   - seccomp: no `net` (and no `db`) => socket() fails with EACCES; no `proc` => exec, fork and non-thread
+     clone fail with EACCES; always: ptrace, bpf, io_uring, mount, namespaces, keyrings, modules.
+   DRIFT_SANDBOX=off disables it, =strict panics if a layer is unavailable; DRIFT_SANDBOX_REPORT=1 prints
+   the active layers and probes to stderr. Best effort by default: old kernels run unrestricted. */
+
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define D_SANITIZED 1   /* LeakSanitizer needs ptrace, a non-thread clone and /proc */
+#else
+#define D_SANITIZED 0
+#endif
+enum { EF_IO = 1, EF_FS = 2, EF_NET = 4, EF_DB = 8, EF_ENV = 16, EF_TIME = 32, EF_RAND = 64, EF_PROC = 128, EF_SPAWN = 256 };
+
+#ifndef SYS_landlock_create_ruleset
+#define SYS_landlock_create_ruleset 444
+#define SYS_landlock_add_rule 445
+#define SYS_landlock_restrict_self 446
+#endif
+struct d_ll_ruleset { uint64_t handled_access_fs; };
+struct d_ll_path { uint64_t allowed_access; int32_t parent_fd; } __attribute__((packed));
+#define LL_READ_FILE (1ull << 2)
+#define LL_READ_DIR (1ull << 3)
+
+static int ll_abi;
+/* 1 applied, 0 unsupported by the kernel, -1 failed */
+static int sb_landlock(int net) {
+  long abi = syscall(SYS_landlock_create_ruleset, NULL, 0, 1u /* LANDLOCK_CREATE_RULESET_VERSION */);
+  if (abi < 1) return 0;
+  ll_abi = (int)abi;
+  uint64_t handled = (1ull << 13) - 1;
+  if (abi >= 2) handled |= 1ull << 13;  /* REFER */
+  if (abi >= 3) handled |= 1ull << 14;  /* TRUNCATE */
+  if (abi >= 5) handled |= 1ull << 15;  /* IOCTL_DEV */
+  struct d_ll_ruleset attr = {handled};
+  int rs = (int)syscall(SYS_landlock_create_ruleset, &attr, sizeof attr, 0);
+  if (rs < 0) return -1;
+  static const char* const net_paths[] = {
+    "/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf", "/etc/gai.conf", "/etc/host.conf", "/etc/services",
+    "/etc/protocols", "/etc/ssl", "/etc/pki", "/etc/ca-certificates", "/usr/lib/ssl", "/usr/share/ca-certificates",
+    "/usr/local/share/ca-certificates", "/run/systemd/resolve", "/lib", "/lib64", "/usr/lib", "/usr/lib64", NULL};
+  static const char* const san_paths[] = {"/proc", "/sys/devices/system/cpu", NULL};
+  const char* const* lists[2] = {net ? net_paths : NULL, D_SANITIZED ? san_paths : NULL};
+  for (int l = 0; l < 2; l++) {
+    for (const char* const* p = lists[l]; p && *p; p++) {
+      int fd = open(*p, O_PATH | O_CLOEXEC);
+      if (fd < 0) continue;
+      struct stat st;
+      int dir = fstat(fd, &st) == 0 && S_ISDIR(st.st_mode);
+      struct d_ll_path pb = {dir ? (LL_READ_FILE | LL_READ_DIR) : LL_READ_FILE, fd};
+      syscall(SYS_landlock_add_rule, rs, 1 /* LANDLOCK_RULE_PATH_BENEATH */, &pb, 0);
+      close(fd);
+    }
+  }
+  int ok = syscall(SYS_landlock_restrict_self, rs, 0) == 0;
+  close(rs);
+  return ok ? 1 : -1;
+}
+
+#if __has_include(<linux/seccomp.h>) && __has_include(<linux/filter.h>) && __has_include(<linux/audit.h>)
+#include <linux/seccomp.h>
+#include <linux/filter.h>
+#include <linux/audit.h>
+#include <sched.h>
+#if defined(__x86_64__)
+#define D_AUDIT_ARCH AUDIT_ARCH_X86_64
+#elif defined(__aarch64__)
+#define D_AUDIT_ARCH AUDIT_ARCH_AARCH64
+#endif
+#endif
+
+#ifdef D_AUDIT_ARCH
+typedef struct SF { struct sock_filter f[160]; int n; } SF;
+static void sf_add(SF* s, struct sock_filter x) { if (s->n < 160) s->f[s->n++] = x; }
+static void sf_deny(SF* s, int nr, int err) {
+  sf_add(s, (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)nr, 0, 1));
+  sf_add(s, (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (uint32_t)err));
+}
+static int sb_seccomp(int net, int proc) {
+  SF s; s.n = 0;
+  sf_add(&s, (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)));
+  sf_add(&s, (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, D_AUDIT_ARCH, 1, 0));
+  sf_add(&s, (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS)); /* foreign ABI (e.g. int 0x80) */
+  sf_add(&s, (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)));
+#ifdef __x86_64__
+  sf_add(&s, (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, 0x40000000u, 0, 1)); /* x32 */
+  sf_add(&s, (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | ENOSYS));
+#endif
+  static const int always[] = {
+    SYS_bpf, SYS_perf_event_open, SYS_userfaultfd, SYS_kexec_load, SYS_init_module, SYS_finit_module, SYS_delete_module,
+    SYS_mount, SYS_umount2, SYS_pivot_root, SYS_chroot, SYS_unshare, SYS_setns, SYS_keyctl, SYS_add_key, SYS_request_key,
+    SYS_process_vm_readv, SYS_process_vm_writev,
+#ifdef SYS_io_uring_setup
+    SYS_io_uring_setup,
+#endif
+  };
+  for (size_t k = 0; k < sizeof always / sizeof always[0]; k++) sf_deny(&s, always[k], EPERM);
+  if (!D_SANITIZED) sf_deny(&s, SYS_ptrace, EPERM);
+  if (!net) sf_deny(&s, SYS_socket, EACCES);
+  if (!proc) {
+    sf_deny(&s, SYS_execve, EACCES);
+    sf_deny(&s, SYS_execveat, EACCES);
+#ifdef SYS_fork
+    sf_deny(&s, SYS_fork, EACCES);
+    sf_deny(&s, SYS_vfork, EACCES);
+#endif
+#ifdef SYS_clone3
+    sf_deny(&s, SYS_clone3, ENOSYS); /* its flags live in memory; libc falls back to clone */
+#endif
+    if (!D_SANITIZED) {
+      /* clone: only threads (CLONE_THREAD in the first argument) */
+      sf_add(&s, (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_clone, 0, 4));
+      sf_add(&s, (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])));
+      sf_add(&s, (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, CLONE_THREAD, 0, 1));
+      sf_add(&s, (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
+      sf_add(&s, (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EACCES));
+    }
+  }
+  sf_add(&s, (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
+  if (s.n >= 160) return -1;
+  struct sock_fprog prog = {(unsigned short)s.n, s.f};
+  return prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog, 0, 0) == 0 ? 1 : -1;
+}
+#else
+static int sb_seccomp(int net, int proc) { (void)net; (void)proc; return 0; }
+#endif
+
+static const char* sb_state(int r) { return r == 2 ? "off (uses fs)" : r > 0 ? "on" : r == 0 ? "unavailable" : "failed"; }
+static void sb_report(int bits, int ll, int sc) {
+  static const char* const names[] = {"io", "fs", "net", "db", "env", "time", "rand", "proc", "spawn"};
+  char eff[80] = "";
+  for (int i = 0; i < 9; i++) if (bits & (1 << i)) { if (eff[0]) strcat(eff, ","); strcat(eff, names[i]); }
+  fprintf(stderr, "sandbox: uses=%s landlock=%s", eff[0] ? eff : "(pure)", sb_state(ll));
+  if (ll == 1) fprintf(stderr, "(abi %d)", ll_abi);
+  fprintf(stderr, " seccomp=%s\n", sb_state(sc));
+  int fd = open("/etc/passwd", O_RDONLY | O_CLOEXEC);
+  fprintf(stderr, "sandbox: read /etc/passwd: %s\n", fd >= 0 ? "allowed" : strerror(errno));
+  if (fd >= 0) close(fd);
+  fd = open("drift-sandbox-probe.tmp", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+  fprintf(stderr, "sandbox: create a file: %s\n", fd >= 0 ? "allowed" : strerror(errno));
+  if (fd >= 0) { close(fd); unlink("drift-sandbox-probe.tmp"); }
+  int so = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  fprintf(stderr, "sandbox: open a socket: %s\n", so >= 0 ? "allowed" : strerror(errno));
+  if (so >= 0) close(so);
+  fflush(stderr);
+  pid_t p = fork();
+  if (p == 0) _exit(0);
+  if (p > 0) waitpid(p, NULL, 0);
+  fprintf(stderr, "sandbox: fork: %s\n", p >= 0 ? "allowed" : strerror(errno));
+}
+void d_sandbox(int bits) {
+  const char* mode = getenv("DRIFT_SANDBOX");
+  if (mode && !strcmp(mode, "off")) return;
+  int strict = mode && !strcmp(mode, "strict");
+  int fs = bits & (EF_FS | EF_DB), net = bits & (EF_NET | EF_DB), proc = bits & EF_PROC;
+  if (net) { http_init_once(); tls_load(); }   /* dlopen OpenSSL while the filesystem is still open */
+  prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+  int ll = fs ? 1 : sb_landlock(net != 0);
+  int sc = sb_seccomp(net != 0, proc != 0);
+  if (getenv("DRIFT_SANDBOX_REPORT")) sb_report(bits, fs ? 2 : ll, sc);
+  if (ll < 0 || sc < 0 || (strict && (ll == 0 || sc == 0)))
+    panicf("cannot apply the sandbox (landlock %s, seccomp %s); set DRIFT_SANDBOX=off to run unrestricted", sb_state(ll), sb_state(sc));
 }

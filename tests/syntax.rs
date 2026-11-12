@@ -143,9 +143,13 @@ fn empty_closure_still_parses() {
 }
 
 #[test]
-fn string_literal_inside_interpolation_is_one_diagnostic() {
-    assert_eq!(codes("fn f(m: Map[Str, Int]) -> Str {\n  \"{m.get(\"k\")} ok\"\n}\n"), vec!["L0008"]);
-    assert_eq!(codes("fn f(xs: List[Str]) -> Str {\n  \"{xs.contains(\"a\")}\"\n}\n"), vec!["L0008"]);
-    // a quote with nothing open still means the `}` is missing
+fn string_literals_inside_interpolations() {
+    assert!(codes("fn f(m: Map[Str, Int]) -> Str {\n  \"{m.get(\"k\")} ok\"\n}\n").is_empty());
+    assert!(codes("fn f(xs: List[Str]) -> Str {\n  \"{xs.contains(\"a\")} {xs.join(\", \")}\"\n}\n").is_empty());
+    // nested strings may interpolate too, and may contain braces and escaped quotes
+    assert!(codes("fn f(n: Int) -> Str {\n  \"<{\"n={n}\" + \"\\\"\\}\"}>\"\n}\n").is_empty());
+    assert!(codes("fn f(n: Int) -> Str {\n  \"{r\"a}b\" + \"{n}\"}\"\n}\n").is_empty());
+    // a quote that cannot start a closed literal still means the `}` is missing, with one fix
     assert_eq!(codes("fn f(n: Int) -> Str {\n  \"{n\"\n}\n"), vec!["L0005"]);
+    assert_fix_clears("fn f(n: Int) -> Str {\n  \"{n\"\n}\n", "L0005");
 }

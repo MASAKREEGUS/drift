@@ -1,0 +1,18 @@
+fn double(n: Int) -> Int {
+  n * 2
+}
+
+examples double {
+  double(2) == 4
+}
+
+test "files are reachable when declared" uses fs {
+  let p = fs.temp_path("sb")?
+  fs.write_str(p, "x")?
+  assert fs.read_str(p)? == "x", "round trip"
+  fs.remove(p)?
+}
+
+test "pure test" {
+  assert double(3) == 6, "pure"
+}

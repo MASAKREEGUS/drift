@@ -30,7 +30,7 @@ typedef struct DBuf { char* p; int64_t len, cap; } DBuf;
    k: a K_* kind. num: K_INT 0 Int 1 I32 2 U8 3 U32 4 U64; K_FLOAT 0 Float 1 F32.
    a: element types (List/Set: 1, Map: 2, tuple: n). K_ADT: t and vf[variant][field]. */
 typedef struct DTy { int32_t k, num; int64_t n; const struct DTy* const* a; DType* t; const struct DTy* const* const* vf; } DTy;
-typedef struct DTest { const char* name; V (*fn)(void); int is_example; const char* file; int line; } DTest;
+typedef struct DTest { const char* name; V (*fn)(void); int is_example; const char* file; int line; int effects; } DTest;
 
 extern const char* d_loc_file;
 extern int d_loc_line;
@@ -147,6 +147,8 @@ void d_example_fail(const char* file, int line, const char* src, V l, V r);
 void d_example_false(const char* file, int line, const char* src);
 
 void d_init(int argc, char** argv);
+/* Restrict the process to the effects in `bits` (bit i = check::EFFECTS[i]): Landlock + seccomp. */
+void d_sandbox(int bits);
 int d_finish_main(V r, int is_result);
 int d_run_tests(const DTest* tests, int n, int argc, char** argv);
 #endif
