@@ -19,6 +19,7 @@ Files end in `.dr`. One file = one module; module path = file path (`src/shop/of
 "text {expr} text"    escapes: \n \t \r \\ \" \{ \u{1F600}
 r"raw, {not} interpolated"     b"bytes"     """multi-line, common indent stripped"""
 ```
+Interpolations hold one expression and never contain string literals: bind the value with `let` first.
 Naming is enforced: `snake_case` for values, functions, fields, modules; `PascalCase` for types and variants; `UPPER_CASE` for consts.
 
 ## Types

@@ -52,12 +52,13 @@ The `drift mcp` server exposes the same operations as tools so the agent never p
 
 ### Diagnostic shape (stable contract)
 ```json
-{"code":"E0204","severity":"error","span":{"file":"src/offers.dr","start":[12,3],"end":[12,41]},
- "message":"function returns Result[Int, OfferError] but this expression is Int",
- "expected":"Result[Int, OfferError]","found":"Int",
- "fix":{"edits":[{"span":{"start":[12,3],"end":[12,41]},"insert_before":"Ok(","insert_after":")"}]},
- "explain":"drift explain E0204"}
+{"code":"P0031","severity":"error","span":{"file":"src/a.dr","start":[1,18],"end":[1,19]},
+ "message":"generic arguments use square brackets in Drift","expected":"`[`","found":"`<`",
+ "fix":{"edits":[{"span":{"file":"src/a.dr","start":[1,18],"end":[1,19]},"text":"["},
+                 {"span":{"file":"src/a.dr","start":[1,22],"end":[1,23]},"text":"]"}]}}
 ```
+Rules: one JSON object per line, sorted by position; `fix` appears only when the edit is certain;
+the parser recovers as if each fix were applied, so one mistake yields one diagnostic.
 
 ## 6. How "better for AI" is measured (eval/)
 For each task in `eval/TASKS.md`, the agent gets only `CARD.md` plus the task text, in Drift, and the same task in Python and Rust.
