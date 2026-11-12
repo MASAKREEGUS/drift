@@ -632,7 +632,41 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// `r"""..."""`: no escapes, no interpolation; indentation handled like `"""`.
+    fn raw_triple_string(&mut self) {
+        let lo = self.pos;
+        let body_start = self.pos + 4;
+        let Some(close) = self.src[body_start..self.end].find("\"\"\"").map(|i| body_start + i) else {
+            self.pos = self.end;
+            self.err("L0002", lo, self.end, "unterminated `r\"\"\"` string");
+            return;
+        };
+        let body = &self.src[body_start..close];
+        let text = if let Some(rest) = body.strip_prefix('\n') {
+            let lines: Vec<&str> = rest.split('\n').collect();
+            let indent = lines.iter().filter(|l| !l.trim().is_empty()).map(|l| l.len() - l.trim_start_matches(' ').len()).min().unwrap_or(0);
+            let mut out: Vec<String> = lines
+                .iter()
+                .map(|l| {
+                    let strip = (l.len() - l.trim_start_matches(' ').len()).min(indent);
+                    l[strip..].to_string()
+                })
+                .collect();
+            if lines.len() > 1 && lines.last().map_or(false, |l| l.trim().is_empty()) {
+                out.pop();
+            }
+            out.join("\n")
+        } else {
+            body.to_string()
+        };
+        self.pos = close + 3;
+        self.push(Tok::RawStr(text), lo);
+    }
+
     fn raw_string(&mut self) {
+        if self.src[self.pos..self.end].starts_with("r\"\"\"") {
+            return self.raw_triple_string();
+        }
         let lo = self.pos;
         self.pos += 2;
         let start = self.pos;

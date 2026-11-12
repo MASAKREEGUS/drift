@@ -3,7 +3,13 @@ struct Echo { method: Str, path: Str, query: Map[Str, Str], body: Str, agent: Op
 fn handle(req: http.Request) -> http.Response {
   match req.path {
     "/echo" => {
-      let e = Echo { method: req.method, path: req.path, query: req.query, body: req.body, agent: req.headers.get("user-agent") }
+      let e = Echo {
+        method: req.method,
+        path: req.path,
+        query: req.query,
+        body: req.body,
+        agent: req.headers.get("user-agent"),
+      }
       http.Response.json(json.encode(e))
     }
     "/old" => http.Response.status(302).with_header("Location", "/echo?from=old")

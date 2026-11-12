@@ -38,7 +38,8 @@ extern int d_loc_line;
 #define D_UNIT ((V){.k = K_UNIT, .i = 0})
 
 extern DType d_td_core_Option, d_td_core_Result, d_td_core_Error, d_td_fs_IoError, d_td_fs_Mode,
-    d_td_http_HttpError, d_td_http_Request, d_td_http_Response, d_td_json_JsonError;
+    d_td_http_HttpError, d_td_http_Request, d_td_http_Response, d_td_json_JsonError,
+    d_td_re_Regex, d_td_re_RegexError, d_td_re_Match, d_td_html_Document, d_td_html_Node;
 
 _Noreturn void d_panic_c(const char* msg);
 _Noreturn void d_panic_v(V msg);

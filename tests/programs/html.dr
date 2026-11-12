@@ -1,0 +1,104 @@
+struct Product { name: Str, price: Str, url: Option[Str], tags: List[Str] }
+
+fn page() -> Str {
+  r"""
+    <!DOCTYPE html>
+    <html><head><title>Ofertas &amp; más</title>
+    <style>.x { color: red } p > a { }</style>
+    <script>if (a < b && c > d) { document.write("<p>no</p>") }</script>
+    </head>
+    <body class="home dark">
+    <!-- listado -->
+    <ul id=list>
+      <li class="item destacado" data-id="1"><a href="/p/1">Café   Molido&nbsp;500g</a><span class=price>$4.990</span>
+      <li class="item" data-id="2"><A HREF='/p/2' Title="Té">Té &ntilde;ame</A><span class="price old">$2.990</span><span class=price>$1.990</span>
+      <li class="item agotado" data-id="3"><b>Pan</b><span class=price>$990</span>
+    </ul>
+    <p>Párrafo uno<p>Párrafo <i>dos</i>
+    <div id="dup" id="otro"><br/>línea<br>siguiente<img src="x.png" alt="foto &copy; 2026"></div>
+    <table><tr><td>a<td>b<tr><td>c</table>
+    <p>&#241; &#xF1; &bogus; &amp &lt;tag&gt; 5 &lt 6</p>
+    </body></html>
+  """
+}
+
+fn product(li: html.Node) -> Product {
+  let link = li.select_first("a")
+  let price = li.select_first(".price:not(.old)")
+  let name = match link {
+    Some(a) => a.text()
+    None => li.text()
+  }
+  Product {
+    name,
+    price: price.map(|p| p.text()).unwrap_or("?"),
+    url: link.and_then(|a| a.attr("href")),
+    tags: li.attr("class").unwrap_or("").split_whitespace(),
+  }
+}
+
+fn count(doc: html.Document, css: Str) -> Str {
+  let n = doc.select(css).len()
+  "{css} => {n}"
+}
+
+pub fn main() -> Result[(), Error] uses io {
+  let doc = html.parse(page())
+  let title = doc.select_first("title").map(|t| t.text())
+  io.println("{title}")
+  for li in doc.select("ul#list > li.item") {
+    io.println(json.encode(product(li)))
+  }
+  let sels = [
+    "li",
+    "li:first-child",
+    "li:last-child",
+    "li:nth-child(2)",
+    "li:nth-child(odd)",
+    "li:not(.agotado)",
+    "[data-id]",
+    "[data-id=\"2\"]",
+    "a[href^=\"/p/\"]",
+    "a[title]",
+    "span.price.old",
+    "li + li",
+    "li ~ li",
+    "body ul a",
+    "td",
+    "tr:nth-child(2) td",
+    "p",
+    "div br",
+    "img[alt*=\"2026\"]",
+    "script, style",
+    ".dark li > b",
+    "*:empty",
+    "td:only-child",
+  ]
+  for s in sels {
+    io.println(count(doc, s))
+  }
+  let div = doc.select_first("#dup")
+  match div {
+    Some(d) => {
+      io.println("{d.text()} | {d.attrs()} | {d.inner_html()}")
+      let kids = d.children().map(|k| k.tag())
+      io.println("{kids} parent={d.parent().map(|p| p.tag())}")
+    }
+    None => io.println("no div")
+  }
+  let ps = doc.select("p").map(|p| p.text())
+  io.println("{ps}")
+  let script = doc.select_first("script").map(|s| s.text())
+  io.println("{script}")
+  let first = doc.select_first("li")
+  io.println("{first}")
+  io.println("{doc}")
+  let tds = doc.select("td").map(|t| t.html())
+  io.println("{tds}")
+  io.println(doc.text())
+  // 5000 unclosed levels: nesting is capped, nothing overflows
+  let deep = html.parse("<div>".repeat(5000) + "fondo")
+  let divs = deep.select("div").len()
+  io.println("{divs} {deep.text()}")
+  Ok(())
+}

@@ -710,6 +710,15 @@ impl<'a> Printer<'a> {
                 s.push('"');
                 t(s)
             }
+            ExprKind::RawStr(s) if s.contains('\n') || s.ends_with('"') => {
+                let mut lines = Vec::new();
+                for l in s.split('\n') {
+                    lines.push(Doc::HardLine);
+                    lines.push(t(l.trim_end().to_string()));
+                }
+                cat(vec![t("r\"\"\""), nest(cat(lines)), Doc::HardLine, t("\"\"\"")])
+            }
+            ExprKind::RawStr(s) if s.contains('"') => t(format!("r\"\"\"{}\"\"\"", s)),
             ExprKind::RawStr(s) => t(format!("r\"{}\"", s)),
             ExprKind::Bytes(b) => {
                 let mut s = String::from("b\"");

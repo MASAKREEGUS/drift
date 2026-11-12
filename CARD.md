@@ -18,6 +18,7 @@ Files end in `.dr`. One file = one module; module path = file path (`src/shop/of
 42  1_000  0xff  0b1010  3.14  1e-9  true  false
 "text {expr} text"    escapes: \n \t \r \\ \" \{ \u{1F600}
 r"raw, {not} interpolated"     b"bytes"     """multi-line, common indent stripped"""
+r"""raw multi-line: HTML, JSON, CSS, regex as-is; no escapes, no {interpolation}"""
 ```
 Interpolations hold one expression and never contain string literals: bind the value with `let` first.
 Naming is enforced: `snake_case` for values, functions, fields, modules; `PascalCase` for types and variants; `UPPER_CASE` for consts.
@@ -177,6 +178,8 @@ Every std module is always in scope (`io.println`, `fs.read_str`, `http.get`, `j
 - `env.args()` starts with the program name: the first argument is `env.args().get(1)`.
 - `json.decode` needs the target type at the call: `let o: Offer = json.decode(text)?` or `json.decode[List[Offer]](text)?`.
 - `http.get`/`http.post` follow redirects and return `Err` (with `.status`) for status >= 400; `http.request(method, url, headers, body)` returns any status. `.text()` honors the response charset.
+- `re.compile(r"(\d+)-(\d+)")?` then `.find`, `.find_all`, `.is_match`, `.replace_all(text, "$2/$1")`, `.split`; `Match` has `text`, `start`, `end` (character indices) and `groups: List[Option[Str]]`. Linear time; no backreferences or lookaround.
+- `html.parse(src).select("ul#list > li.item:not(.agotado)")` → `List[html.Node]`; a node has `.text()` (whitespace collapsed), `.attr("href")`, `.attrs()`, `.tag()`, `.html()`, `.inner_html()`, `.children()`, `.parent()`, `.select(css)`, `.select_first(css)`.
 
 ## Toolchain — single binary `drift`
 | command | purpose |

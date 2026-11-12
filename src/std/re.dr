@@ -1,0 +1,17 @@
+/// Regular expressions with RE2-like syntax, matched in linear time (no backreferences or lookaround).
+/// Syntax: `.` `[a-z]` `[^...]` `\d \w \s \D \W \S \b \B \A \z ^ $` `(...)` `(?:...)` `a|b`
+/// `* + ? {n} {n,} {n,m}` (add `?` for lazy) and flags `(?i)` `(?m)` `(?s)` or scoped `(?i:...)`.
+pub struct Regex {}
+pub struct RegexError { message: Str }
+/// `start` and `end` are character indices into the searched text; `groups[i]` is capture group i + 1.
+pub struct Match { text: Str, start: Int, end: Int, groups: List[Option[Str]] }
+pub fn compile(pattern: Str) -> Result[Regex, RegexError] { todo }
+/// `text` with every regex metacharacter escaped, for building patterns from data.
+pub fn escape(text: Str) -> Str { todo }
+pub fn pattern(self: Regex) -> Str { todo }
+pub fn is_match(self: Regex, text: Str) -> Bool { todo }
+pub fn find(self: Regex, text: Str) -> Option[Match] { todo }
+pub fn find_all(self: Regex, text: Str) -> List[Match] { todo }
+/// `replacement` may use `$0`..`$9` or `${n}` for groups and `$$` for a dollar sign.
+pub fn replace_all(self: Regex, text: Str, replacement: Str) -> Str { todo }
+pub fn split(self: Regex, text: Str) -> List[Str] { todo }

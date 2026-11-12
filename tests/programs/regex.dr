@@ -1,0 +1,61 @@
+fn show_all(pattern: Str, text: Str) -> Str {
+  match re.compile(pattern) {
+    Ok(rx) => {
+      let ms = rx.find_all(text).map(|m| "{m.start}-{m.end}:{m.text}")
+      ms.join(" ")
+    }
+    Err(e) => e.message
+  }
+}
+
+pub fn main() -> Result[(), Error] uses io {
+  let price = re.compile(r"\$\s*(\d{1,3}(?:\.\d{3})*)")?
+  let text = "Antes $ 549.990, ahora $49.990 (ñandú: $1.234.567)"
+  for m in price.find_all(text) {
+    io.println("{m.start} {m.end} {m.text} {m.groups}")
+  }
+  io.println(price.replace_all(text, "CLP$1"))
+  let free = price.is_match("gratis")
+  let none = price.find("x")
+  io.println("{free} {none}")
+  io.println(show_all(r"\bcafé\b", "café cafétera Café"))
+  io.println(show_all(r"(?i)\bcafé\b", "café cafétera CAFÉ"))
+  io.println(show_all("a*", "baaa"))
+  io.println(show_all("a+?", "aaa"))
+  io.println(show_all("<.+?>", "<a><b>"))
+  io.println(show_all("<.+>", "<a><b>"))
+  io.println(show_all("(?m)^\\w+", "uno dos\ntres cuatro"))
+  io.println(show_all("^\\w+", "uno dos\ntres cuatro"))
+  io.println(show_all("[^\\s,]+", "a, b,,c"))
+  io.println(show_all(r"x{2,3}", "xxxxxxx"))
+  io.println(show_all("(a|ab)(c|bcd)(d*)", "abcd"))
+  io.println(show_all("[[:alpha:]]", "x"))
+  io.println(show_all("(?=x)", "x"))
+  io.println(show_all("(a", "x"))
+  io.println(show_all("a)", "x"))
+  io.println(show_all("\\1", "x"))
+  io.println(show_all("*a", "x"))
+  io.println(show_all("[z-a]", "x"))
+  let sep = re.compile(r"\s*[,;]\s*")?
+  let parts = sep.split("a , b;c ,, d")
+  io.println("{parts}")
+  let date = re.compile(r"(\d{4})-(\d{2})-(\d{2})")?
+  io.println(date.replace_all("2026-11-12 y 2025-01-31", "$3/$2/$1 ($$)"))
+  let opt = re.compile("(x)?y")?
+  let found = opt.find("y")
+  io.println("{found}")
+  io.println(re.escape("1+1=2? (sí) [$5]"))
+  let lit = re.compile(re.escape("a.b*c"))?
+  let yes = lit.is_match("a.b*c")
+  let no = lit.is_match("axbbc")
+  io.println("{yes} {no} {lit}")
+  // linear time: this classic catastrophic pattern returns at once
+  let evil = re.compile("(a+)+$")?
+  let long = "a".repeat(5000) + "b"
+  io.println("{evil.is_match(long)}")
+  // long patterns compile without deep recursion
+  let wide = re.compile("a".repeat(5000))?
+  let hit = wide.is_match(long)
+  io.println("{hit}")
+  Ok(())
+}

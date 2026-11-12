@@ -1,11 +1,26 @@
-/// HTML parsing and CSS selection.
+/// Forgiving HTML parsing (implied end tags, entities, raw script/style) and CSS selection.
+/// Selectors: `tag` `*` `#id` `.class` `[a]` `[a=v]` `[a~=v]` `[a^=v]` `[a$=v]` `[a*=v]` `[a|=v]`,
+/// `:first-child` `:last-child` `:only-child` `:nth-child(2n+1|odd|even)` `:nth-last-child(n)` `:empty` `:not(...)`,
+/// combinators ` ` `>` `+` `~` and groups `a, b`. An invalid selector is a bug and panics.
 pub struct Document {}
-
 pub struct Node {}
-
 pub fn parse(source: Str) -> Document { todo }
 pub fn select(self: Document, css: Str) -> List[Node] { todo }
 pub fn select_first(self: Document, css: Str) -> Option[Node] { todo }
+/// All text of the document, whitespace collapsed (script and style excluded).
+pub fn text(self: Document) -> Str { todo }
+/// Elements under this node matching `css` (ancestors outside the node may take part in the match).
+pub fn select(self: Node, css: Str) -> List[Node] { todo }
+pub fn select_first(self: Node, css: Str) -> Option[Node] { todo }
+/// Lower-case tag name: `"a"`, `"div"`.
+pub fn tag(self: Node) -> Str { todo }
+/// Text inside the element, entities decoded, whitespace collapsed to single spaces and trimmed.
 pub fn text(self: Node) -> Str { todo }
 pub fn attr(self: Node, name: Str) -> Option[Str] { todo }
+pub fn attrs(self: Node) -> Map[Str, Str] { todo }
+/// The element's source, start tag to end tag.
 pub fn html(self: Node) -> Str { todo }
+/// The source between the start and end tags.
+pub fn inner_html(self: Node) -> Str { todo }
+pub fn children(self: Node) -> List[Node] { todo }
+pub fn parent(self: Node) -> Option[Node] { todo }

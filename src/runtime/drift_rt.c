@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <ctype.h>
 #include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -563,6 +564,7 @@ static void show_quoted(DBuf* b, const char* p, int64_t n, int bytes) {
   }
   buf_ch(b, '"');
 }
+static void html_show(DBuf* b, V v);
 void d_show_into(DBuf* b, V v, int top) {
   switch (v.k) {
   case K_UNIT: buf_cstr(b, "()"); break;
@@ -599,6 +601,8 @@ void d_show_into(DBuf* b, V v, int top) {
   case K_ADT: {
     DAdt* a = A(v);
     const DVariant* var = &a->t->v[a->tag];
+    if (a->t == &d_td_re_Regex) { buf_cstr(b, "Regex("); show_quoted(b, S(a->f[0])->p, S(a->f[0])->len, 0); buf_ch(b, ')'); break; }
+    if (a->t == &d_td_html_Document || a->t == &d_td_html_Node) { html_show(b, v); break; }
     if (a->t->bare) buf_cstr(b, var->name);
     else {
       buf_cstr(b, a->t->name);
@@ -729,6 +733,10 @@ static const char* const f_ioerror[] = {"message", "path"};
 static const char* const f_httperror[] = {"message", "status"};
 static const char* const f_request[] = {"method", "path", "query", "headers", "body"};
 static const char* const f_response[] = {"status", "headers", "body"};
+static const char* const f_regex[] = {"pattern", "program"};
+static const char* const f_match[] = {"text", "start", "end", "groups"};
+static const char* const f_doc[] = {"data"};
+static const char* const f_node[] = {"doc", "index"};
 static const DVariant v_option[] = {{"Some", 1, NULL}, {"None", 0, NULL}};
 static const DVariant v_result[] = {{"Ok", 1, NULL}, {"Err", 1, NULL}};
 static const DVariant v_error[] = {{NULL, 1, f_message}};
@@ -737,7 +745,12 @@ static const DVariant v_mode[] = {{"Read", 0, NULL}, {"Write", 0, NULL}, {"Appen
 static const DVariant v_httperror[] = {{NULL, 2, f_httperror}};
 static const DVariant v_request[] = {{NULL, 5, f_request}};
 static const DVariant v_response[] = {{NULL, 3, f_response}};
+static const DVariant v_regex[] = {{NULL, 2, f_regex}};
+static const DVariant v_match[] = {{NULL, 4, f_match}};
+static const DVariant v_doc[] = {{NULL, 1, f_doc}};
+static const DVariant v_node[] = {{NULL, 2, f_node}};
 static const DVariant v_jsonerror[] = {{NULL, 1, f_message}};
+static const DVariant v_message1[] = {{NULL, 1, f_message}};
 DType d_td_core_Option = {"Option", 2, v_option, 1, 1, NULL};
 DType d_td_core_Result = {"Result", 2, v_result, 1, 1, NULL};
 DType d_td_core_Error = {"Error", 1, v_error, 0, 0, NULL};
@@ -746,6 +759,11 @@ DType d_td_fs_Mode = {"Mode", 4, v_mode, 1, 0, NULL};
 DType d_td_http_HttpError = {"HttpError", 1, v_httperror, 0, 0, NULL};
 DType d_td_http_Request = {"Request", 1, v_request, 0, 0, NULL};
 DType d_td_http_Response = {"Response", 1, v_response, 0, 0, NULL};
+DType d_td_re_Regex = {"Regex", 1, v_regex, 0, 0, NULL};
+DType d_td_re_RegexError = {"RegexError", 1, v_message1, 0, 0, NULL};
+DType d_td_re_Match = {"Match", 1, v_match, 0, 0, NULL};
+DType d_td_html_Document = {"Document", 1, v_doc, 0, 0, NULL};
+DType d_td_html_Node = {"Node", 1, v_node, 0, 0, NULL};
 DType d_td_json_JsonError = {"JsonError", 1, v_jsonerror, 0, 0, NULL};
 
 static V mkerror(V msg) { return d_adt(&d_td_core_Error, 0, 1, &msg); }
@@ -2942,4 +2960,1296 @@ V d_n_http_serve(V addr, V handler) {
   close(fd);
   d_release(handler);
   return http_error(err, 0);
+}
+
+/* ------------------------------------------------------------------ re
+   pattern -> AST -> instructions (stored flat in a Bytes value) -> Pike VM over UTF-8.
+   Linear in the text: every position is visited once by at most one thread per instruction. */
+
+enum { R_CHAR, R_ANY, R_CLASS, R_SPLIT, R_JMP, R_SAVE, R_ASSERT, R_MATCH };
+enum { A_BOL, A_EOL, A_MBOL, A_MEOL, A_TSTART, A_TEND, A_WORDB, A_NWORDB };
+/* special class entries (lo field) */
+#define RC_SPEC 0xFFFFFF00u
+enum { RS_DIGIT, RS_NDIGIT, RS_WORD, RS_NWORD, RS_SPACE, RS_NSPACE };
+#define RE_MAX_INST 20000
+#define RE_MAX_REPEAT 1000
+
+typedef struct RInst { int32_t op, x, y, z; } RInst;
+typedef struct RHead { int32_t ninst, ncap, nrange, pad; } RHead;
+
+static uint32_t fold_lower(uint32_t c) {
+  if (c >= 'A' && c <= 'Z') return c + 32;
+  if (c < 0xC0) return c;
+  if (c <= 0xDE && c != 0xD7) return c + 32;
+  if (c >= 0x100 && c <= 0x17F) {
+    if (c == 0x178) return 0xFF;
+    if ((c <= 0x137 || (c >= 0x14A && c <= 0x177)) && !(c & 1)) return c + 1;
+    if (((c >= 0x139 && c <= 0x148) || (c >= 0x179 && c <= 0x17E)) && (c & 1)) return c + 1;
+    return c;
+  }
+  if (c >= 0x391 && c <= 0x3A9 && c != 0x3A2) return c + 32;
+  if (c >= 0x410 && c <= 0x42F) return c + 32;
+  if (c >= 0x400 && c <= 0x40F) return c + 80;
+  return c;
+}
+static int re_word(uint32_t c) { return is_alnum(c) || c == '_'; }
+
+/* ---- parser */
+enum { N_EMPTY, N_CHAR, N_ANY, N_CLASS, N_CAT, N_ALT, N_REP, N_GROUP, N_ASSERT };
+typedef struct RNode { int t; uint32_t c; int fold, dotnl, lo, n, neg, min, max, lazy, cap, a, b; } RNode;
+typedef struct RP {
+  const char* p; int64_t len, i;
+  RNode* nodes; int nn, cn;
+  uint32_t* rg; int nr, cr;      /* class ranges: pairs */
+  int ncap;
+  char err[200];
+} RP;
+static int rp_fail(RP* r, const char* msg) {
+  if (!r->err[0]) snprintf(r->err, sizeof r->err, "%s at position %lld", msg, (long long)chars_before(r->p, r->i));
+  return -1;
+}
+static int rnode(RP* r, int t) {
+  if (r->nn == r->cn) { r->cn = r->cn ? r->cn * 2 : 32; r->nodes = xrealloc(r->nodes, (size_t)r->cn * sizeof(RNode)); }
+  memset(&r->nodes[r->nn], 0, sizeof(RNode));
+  r->nodes[r->nn].t = t;
+  r->nodes[r->nn].a = r->nodes[r->nn].b = -1;
+  return r->nn++;
+}
+static void rrange(RP* r, uint32_t lo, uint32_t hi) {
+  if (r->nr + 2 > r->cr) { r->cr = r->cr ? r->cr * 2 : 32; r->rg = xrealloc(r->rg, (size_t)r->cr * sizeof(uint32_t)); }
+  r->rg[r->nr++] = lo; r->rg[r->nr++] = hi;
+}
+static int rp_more(RP* r) { return r->i < r->len; }
+static uint32_t rp_peek(RP* r, int* l) { return utf8_at(r->p, r->len, r->i, l); }
+static uint32_t rp_next(RP* r) { int l; uint32_t c = rp_peek(r, &l); r->i += l; return c; }
+static int hexdig(uint32_t c) { return c >= '0' && c <= '9' ? (int)c - '0' : c >= 'a' && c <= 'f' ? (int)c - 'a' + 10 : c >= 'A' && c <= 'F' ? (int)c - 'A' + 10 : -1; }
+
+/* after a backslash: a literal codepoint (>= 0), a special class (-2 - RS_*), an assertion (-100 - A_*), or -1 */
+static int64_t rp_escape(RP* r, int in_class) {
+  if (!rp_more(r)) return rp_fail(r, "trailing backslash");
+  int64_t at = r->i;
+  uint32_t c = rp_next(r);
+  switch (c) {
+  case 'd': return -2 - RS_DIGIT; case 'D': return -2 - RS_NDIGIT;
+  case 'w': return -2 - RS_WORD; case 'W': return -2 - RS_NWORD;
+  case 's': return -2 - RS_SPACE; case 'S': return -2 - RS_NSPACE;
+  case 'n': return '\n'; case 't': return '\t'; case 'r': return '\r'; case 'f': return '\f'; case 'v': return '\v'; case '0': return 0;
+  case 'x': {
+    uint32_t v = 0; int k = 0;
+    if (rp_more(r) && r->p[r->i] == '{') {
+      r->i++;
+      while (rp_more(r) && r->p[r->i] != '}' && k < 7) { int h = hexdig((unsigned char)r->p[r->i]); if (h < 0) return rp_fail(r, "bad hex digit in \\x{...}"); v = v * 16 + (uint32_t)h; r->i++; k++; }
+      if (!rp_more(r) || r->p[r->i] != '}' || !k || v > 0x10FFFF) return rp_fail(r, "bad \\x{...} escape");
+      r->i++;
+    } else {
+      for (; k < 2; k++) { int h = rp_more(r) ? hexdig((unsigned char)r->p[r->i]) : -1; if (h < 0) return rp_fail(r, "\\x needs two hex digits or \\x{...}"); v = v * 16 + (uint32_t)h; r->i++; }
+    }
+    return v;
+  }
+  }
+  if (!in_class) {
+    switch (c) {
+    case 'b': return -100 - A_WORDB; case 'B': return -100 - A_NWORDB;
+    case 'A': return -100 - A_TSTART; case 'z': return -100 - A_TEND;
+    }
+  }
+  if (c >= '1' && c <= '9') { r->i = at; return rp_fail(r, "backreferences are not supported (Drift regexes run in linear time)"); }
+  if (c < 0x80 && (isalnum((int)c))) { r->i = at - 1; return rp_fail(r, "unknown escape"); }
+  return c; /* escaped punctuation or any non-ASCII character */
+}
+static void add_spec(RP* r, int spec) { rrange(r, RC_SPEC + (uint32_t)spec, 0); }
+static int rp_alt(RP* r, int fold, int dotnl, int multi, int depth);
+static int rp_class(RP* r, int fold) {
+  int n = rnode(r, N_CLASS);
+  r->i++; /* [ */
+  int neg = 0;
+  if (rp_more(r) && r->p[r->i] == '^') { neg = 1; r->i++; }
+  int start = r->nr, first = 1;
+  for (;;) {
+    if (!rp_more(r)) return rp_fail(r, "missing `]`");
+    uint32_t c = (unsigned char)r->p[r->i];
+    if (c == ']' && !first) { r->i++; break; }
+    first = 0;
+    if (c == '[' && r->i + 1 < r->len && r->p[r->i + 1] == ':') return rp_fail(r, "POSIX classes like [:alpha:] are not supported; use \\d, \\w, \\s or ranges");
+    int64_t lo;
+    if (c == '\\') { r->i++; lo = rp_escape(r, 1); if (lo == -1) return -1; if (lo < -1) { add_spec(r, (int)(-2 - lo)); continue; } }
+    else lo = rp_next(r);
+    int64_t hi = lo;
+    if (r->i + 1 < r->len && r->p[r->i] == '-' && r->p[r->i + 1] != ']') {
+      r->i++;
+      if (r->p[r->i] == '\\') { r->i++; hi = rp_escape(r, 1); if (hi == -1) return -1; if (hi < 0) return rp_fail(r, "a class like \\d cannot end a range"); }
+      else hi = rp_next(r);
+      if (hi < lo) return rp_fail(r, "range out of order");
+    }
+    rrange(r, (uint32_t)lo, (uint32_t)hi);
+  }
+  if (fold) {
+    /* add the lower-case forms so matching can compare fold_lower(c) */
+    int end = r->nr;
+    for (int k = start; k < end; k += 2) {
+      uint32_t lo = r->rg[k], hi = r->rg[k + 1];
+      if (lo >= RC_SPEC) continue;
+      if (hi - lo > 4096) { rrange(r, fold_lower(lo), fold_lower(lo)); continue; }
+      for (uint32_t x = lo; x <= hi; x++) { uint32_t f = fold_lower(x); if (f != x) rrange(r, f, f); }
+    }
+  }
+  RNode* nd = &r->nodes[n];
+  nd->lo = start; nd->n = (r->nr - start) / 2; nd->neg = neg; nd->fold = fold;
+  return n;
+}
+static int rp_flags(RP* r, int* fold, int* dotnl, int* multi) {
+  int on = 1;
+  while (rp_more(r) && r->p[r->i] != ')' && r->p[r->i] != ':') {
+    char f = r->p[r->i++];
+    if (f == '-') { on = 0; continue; }
+    if (f == 'i') *fold = on; else if (f == 's') *dotnl = on; else if (f == 'm') *multi = on;
+    else { r->i--; return rp_fail(r, "unknown flag (use i, m or s)"); }
+  }
+  return 0;
+}
+static int rp_atom(RP* r, int* fold, int* dotnl, int* multi, int depth) {
+  int l;
+  uint32_t c = rp_peek(r, &l);
+  int n;
+  switch (c) {
+  case '(': {
+    if (depth > 200) return rp_fail(r, "groups nested too deeply");
+    r->i++;
+    int cap = 1, f = *fold, d = *dotnl, m = *multi;
+    if (rp_more(r) && r->p[r->i] == '?') {
+      r->i++;
+      if (!rp_more(r)) return rp_fail(r, "unfinished group");
+      char k = r->p[r->i];
+      if (k == '=' || k == '!' || (k == '<' && r->i + 1 < r->len && (r->p[r->i + 1] == '=' || r->p[r->i + 1] == '!')))
+        return rp_fail(r, "lookaround is not supported (Drift regexes run in linear time)");
+      if (k == 'P' || k == '<') return rp_fail(r, "named groups are not supported; use (...) and match.groups[i]");
+      if (k == ':') { r->i++; cap = 0; }
+      else {
+        if (rp_flags(r, &f, &d, &m) < 0) return -1;
+        if (!rp_more(r)) return rp_fail(r, "missing `)`");
+        if (r->p[r->i] == ')') { r->i++; *fold = f; *dotnl = d; *multi = m; return rnode(r, N_EMPTY); }
+        r->i++; /* ':' */
+        cap = 0;
+      }
+    }
+    int idx = cap ? ++r->ncap : 0;
+    int inner = rp_alt(r, f, d, m, depth + 1);
+    if (inner < 0) return -1;
+    if (!rp_more(r) || r->p[r->i] != ')') return rp_fail(r, "missing `)`");
+    r->i++;
+    n = rnode(r, N_GROUP);
+    r->nodes[n].a = inner; r->nodes[n].cap = idx;
+    return n;
+  }
+  case '[': return rp_class(r, *fold);
+  case '.': r->i++; n = rnode(r, N_ANY); r->nodes[n].dotnl = *dotnl; return n;
+  case '^': r->i++; n = rnode(r, N_ASSERT); r->nodes[n].c = *multi ? A_MBOL : A_BOL; return n;
+  case '$': r->i++; n = rnode(r, N_ASSERT); r->nodes[n].c = *multi ? A_MEOL : A_EOL; return n;
+  case '*': case '+': case '?': return rp_fail(r, "nothing to repeat");
+  case ')': return rp_fail(r, "unmatched `)`");
+  case '\\': {
+    r->i++;
+    int64_t e = rp_escape(r, 0);
+    if (e == -1) return -1;
+    if (e <= -100) { n = rnode(r, N_ASSERT); r->nodes[n].c = (uint32_t)(-100 - e); return n; }
+    if (e < -1) { n = rnode(r, N_CLASS); r->nodes[n].lo = r->nr; r->nodes[n].n = 1; add_spec(r, (int)(-2 - e)); return n; }
+    n = rnode(r, N_CHAR); r->nodes[n].c = *fold ? fold_lower((uint32_t)e) : (uint32_t)e; r->nodes[n].fold = *fold;
+    return n;
+  }
+  default:
+    r->i += l;
+    n = rnode(r, N_CHAR); r->nodes[n].c = *fold ? fold_lower(c) : c; r->nodes[n].fold = *fold;
+    return n;
+  }
+}
+static int rp_int(RP* r, int* out) {
+  int v = 0, k = 0;
+  while (rp_more(r) && r->p[r->i] >= '0' && r->p[r->i] <= '9') { v = v * 10 + (r->p[r->i] - '0'); if (v > 100000) v = 100000; r->i++; k++; }
+  *out = v;
+  return k;
+}
+static int rp_repeat(RP* r, int atom) {
+  for (;;) {
+    if (!rp_more(r)) return atom;
+    char c = r->p[r->i];
+    int min, max;
+    if (c == '*') { min = 0; max = -1; r->i++; }
+    else if (c == '+') { min = 1; max = -1; r->i++; }
+    else if (c == '?') { min = 0; max = 1; r->i++; }
+    else if (c == '{') {
+      int64_t save = r->i;
+      r->i++;
+      if (!rp_int(r, &min)) { r->i = save; return atom; } /* a literal `{` */
+      max = min;
+      if (rp_more(r) && r->p[r->i] == ',') { r->i++; if (!rp_int(r, &max)) max = -1; }
+      if (!rp_more(r) || r->p[r->i] != '}') return rp_fail(r, "bad repetition {n,m}");
+      r->i++;
+      if (min > RE_MAX_REPEAT || max > RE_MAX_REPEAT) return rp_fail(r, "repetition count over 1000");
+      if (max != -1 && max < min) return rp_fail(r, "repetition {n,m} with m < n");
+    } else return atom;
+    int t = r->nodes[atom].t;
+    if (t == N_ASSERT || t == N_EMPTY) return rp_fail(r, "nothing to repeat");
+    int lazy = 0;
+    if (rp_more(r) && r->p[r->i] == '?') { lazy = 1; r->i++; }
+    else if (rp_more(r) && r->p[r->i] == '+') return rp_fail(r, "possessive quantifiers are not supported");
+    int n = rnode(r, N_REP);
+    r->nodes[n].a = atom; r->nodes[n].min = min; r->nodes[n].max = max; r->nodes[n].lazy = lazy;
+    atom = n;
+  }
+}
+static int rp_cat(RP* r, int fold, int dotnl, int multi, int depth) {
+  int acc = -1;
+  while (rp_more(r) && r->p[r->i] != '|' && r->p[r->i] != ')') {
+    int a = rp_atom(r, &fold, &dotnl, &multi, depth);
+    if (a < 0) return -1;
+    a = rp_repeat(r, a);
+    if (a < 0) return -1;
+    if (acc < 0) acc = a;
+    else { int n = rnode(r, N_CAT); r->nodes[n].a = acc; r->nodes[n].b = a; acc = n; }
+  }
+  return acc < 0 ? rnode(r, N_EMPTY) : acc;
+}
+static int rp_alt(RP* r, int fold, int dotnl, int multi, int depth) {
+  int a = rp_cat(r, fold, dotnl, multi, depth);
+  if (a < 0) return -1;
+  while (rp_more(r) && r->p[r->i] == '|') {
+    r->i++;
+    int b = rp_cat(r, fold, dotnl, multi, depth);
+    if (b < 0) return -1;
+    int n = rnode(r, N_ALT);
+    r->nodes[n].a = a; r->nodes[n].b = b;
+    a = n;
+  }
+  return a;
+}
+
+/* ---- compiler */
+typedef struct RC { RInst* in; int n, cap; int over; RP* r; } RC;
+static int remit(RC* c, int op, int x, int y, int z) {
+  if (c->n >= RE_MAX_INST) { c->over = 1; return c->n; }
+  if (c->n == c->cap) { c->cap = c->cap ? c->cap * 2 : 64; c->in = xrealloc(c->in, (size_t)c->cap * sizeof(RInst)); }
+  c->in[c->n] = (RInst){op, x, y, z};
+  return c->n++;
+}
+static void rcomp(RC* c, int ni) {
+  if (c->over) return;
+  RNode nd = c->r->nodes[ni];
+  switch (nd.t) {
+  case N_EMPTY: break;
+  case N_CHAR: remit(c, R_CHAR, (int32_t)nd.c, nd.fold, 0); break;
+  case N_ANY: remit(c, R_ANY, nd.dotnl, 0, 0); break;
+  case N_CLASS: remit(c, R_CLASS, nd.lo, nd.n, nd.neg | nd.fold << 1); break;
+  case N_ASSERT: remit(c, R_ASSERT, (int32_t)nd.c, 0, 0); break;
+  case N_CAT: {
+    /* concatenations lean left (one level per atom): walk the spine instead of recursing on it */
+    int cnt = 0;
+    for (int k = ni; c->r->nodes[k].t == N_CAT; k = c->r->nodes[k].a) cnt++;
+    int* right = xmalloc((size_t)cnt * sizeof(int));
+    int k = ni;
+    for (int j = cnt - 1; j >= 0; j--) { right[j] = c->r->nodes[k].b; k = c->r->nodes[k].a; }
+    rcomp(c, k);
+    for (int j = 0; j < cnt && !c->over; j++) rcomp(c, right[j]);
+    free(right);
+    break;
+  }
+  case N_ALT: {
+    int sp = remit(c, R_SPLIT, 0, 0, 0);
+    if (c->over) return;
+    c->in[sp].x = c->n; rcomp(c, nd.a);
+    int j = remit(c, R_JMP, 0, 0, 0);
+    if (c->over) return;
+    c->in[sp].y = c->n; rcomp(c, nd.b);
+    if (c->over) return;
+    c->in[j].x = c->n;
+    break;
+  }
+  case N_GROUP:
+    if (nd.cap) remit(c, R_SAVE, 2 * nd.cap, 0, 0);
+    rcomp(c, nd.a);
+    if (nd.cap) remit(c, R_SAVE, 2 * nd.cap + 1, 0, 0);
+    break;
+  case N_REP: {
+    for (int k = 0; k < nd.min; k++) rcomp(c, nd.a);
+    if (nd.max == -1) {
+      /* L: split body, out; body; jmp L */
+      int sp = remit(c, R_SPLIT, 0, 0, 0);
+      if (c->over) return;
+      int body = c->n;
+      rcomp(c, nd.a);
+      remit(c, R_JMP, sp, 0, 0);
+      if (c->over) return;
+      if (nd.lazy) { c->in[sp].x = c->n; c->in[sp].y = body; } else { c->in[sp].x = body; c->in[sp].y = c->n; }
+    } else {
+      int* pend = xmalloc((size_t)(nd.max - nd.min + 1) * sizeof(int));
+      int np = 0;
+      for (int k = nd.min; k < nd.max; k++) {
+        int sp = remit(c, R_SPLIT, 0, 0, 0);
+        if (c->over) { free(pend); return; }
+        pend[np++] = sp;
+        c->in[sp].x = c->n; /* provisional: body first (greedy) */
+        rcomp(c, nd.a);
+      }
+      if (c->over) { free(pend); return; }
+      for (int k = 0; k < np; k++) {
+        int sp = pend[k];
+        int body = sp + 1;
+        if (nd.lazy) { c->in[sp].x = c->n; c->in[sp].y = body; } else { c->in[sp].x = body; c->in[sp].y = c->n; }
+      }
+      free(pend);
+    }
+    break;
+  }
+  }
+}
+
+static V regex_error(const char* pattern, const char* msg) {
+  char m[400];
+  snprintf(m, sizeof m, "invalid regex `%.120s`: %s", pattern, msg);
+  V s = cstr(m);
+  return d_err(d_adt(&d_td_re_RegexError, 0, 1, &s));
+}
+V d_n_re_compile(V pat) {
+  RP r; memset(&r, 0, sizeof r);
+  r.p = S(pat)->p; r.len = S(pat)->len;
+  int root = rp_alt(&r, 0, 0, 0, 0);
+  if (root >= 0 && rp_more(&r)) root = rp_fail(&r, "unmatched `)`");
+  V out;
+  if (root < 0) out = regex_error(S(pat)->p, r.err);
+  else {
+    RC c; memset(&c, 0, sizeof c); c.r = &r;
+    remit(&c, R_SAVE, 0, 0, 0);
+    rcomp(&c, root);
+    remit(&c, R_SAVE, 1, 0, 0);
+    remit(&c, R_MATCH, 0, 0, 0);
+    if (c.over) out = regex_error(S(pat)->p, "pattern too large (over 20000 instructions after expanding repetitions)");
+    else {
+      RHead h = {c.n, 2 * (r.ncap + 1), r.nr, 0};
+      int64_t sz = (int64_t)sizeof h + (int64_t)c.n * (int64_t)sizeof(RInst) + (int64_t)r.nr * 4;
+      V prog = str_alloc(K_BYTES, sz);
+      char* q = S(prog)->p;
+      memcpy(q, &h, sizeof h);
+      memcpy(q + sizeof h, c.in, (size_t)c.n * sizeof(RInst));
+      if (r.nr) memcpy(q + sizeof h + (size_t)c.n * sizeof(RInst), r.rg, (size_t)r.nr * 4);
+      V f[2] = {d_retain(pat), prog};
+      out = d_ok(d_adt(&d_td_re_Regex, 0, 2, f));
+    }
+    free(c.in);
+  }
+  free(r.nodes); free(r.rg);
+  d_release(pat);
+  return out;
+}
+
+/* ---- VM */
+typedef struct RVM {
+  const RHead* h; const RInst* in; const uint32_t* rg;
+  const char* s; int64_t n;
+  int32_t* mark; int32_t gen;
+  int32_t *cpc, *npc; int64_t *ccap, *ncapv; int cn, nn;
+  int64_t* tmp;
+} RVM;
+static RVM* rvm_new(V rx) {
+  RVM* m = xmalloc(sizeof(RVM));
+  const char* p = S(A(rx)->f[1])->p;
+  m->h = (const RHead*)p;
+  m->in = (const RInst*)(p + sizeof(RHead));
+  m->rg = (const uint32_t*)(p + sizeof(RHead) + (size_t)m->h->ninst * sizeof(RInst));
+  int ni = m->h->ninst, nc = m->h->ncap;
+  m->mark = calloc((size_t)ni, sizeof(int32_t));
+  m->gen = 0;
+  m->cpc = xmalloc((size_t)ni * sizeof(int32_t)); m->npc = xmalloc((size_t)ni * sizeof(int32_t));
+  m->ccap = xmalloc((size_t)ni * (size_t)nc * sizeof(int64_t)); m->ncapv = xmalloc((size_t)ni * (size_t)nc * sizeof(int64_t));
+  m->tmp = xmalloc((size_t)nc * sizeof(int64_t));
+  return m;
+}
+static void rvm_free(RVM* m) { free(m->mark); free(m->cpc); free(m->npc); free(m->ccap); free(m->ncapv); free(m->tmp); free(m); }
+static int rclass(const RVM* m, const RInst* ins, uint32_t c) {
+  const uint32_t* g = m->rg + ins->x;
+  int fold = ins->z >> 1, hit = 0;
+  uint32_t fc = fold ? fold_lower(c) : c;
+  for (int k = 0; k < ins->y && !hit; k++) {
+    uint32_t lo = g[2 * k], hi = g[2 * k + 1];
+    if (lo >= RC_SPEC) {
+      switch (lo - RC_SPEC) {
+      case RS_DIGIT: hit = is_digit(c); break; case RS_NDIGIT: hit = !is_digit(c); break;
+      case RS_WORD: hit = re_word(c); break; case RS_NWORD: hit = !re_word(c); break;
+      case RS_SPACE: hit = is_ws(c); break; default: hit = !is_ws(c); break;
+      }
+    } else hit = (c >= lo && c <= hi) || (fold && fc >= lo && fc <= hi);
+  }
+  return hit != (ins->z & 1);
+}
+static uint32_t prev_char(const char* s, int64_t sp) {
+  if (sp <= 0) return 0xFFFFFFFFu;
+  int64_t k = sp - 1;
+  while (k > 0 && ((unsigned char)s[k] & 0xC0) == 0x80) k--;
+  int l; return utf8_at(s, sp, k, &l);
+}
+static int rassert(const RVM* m, int kind, int64_t sp) {
+  switch (kind) {
+  case A_BOL: case A_TSTART: return sp == 0;
+  case A_EOL: case A_TEND: return sp == m->n;
+  case A_MBOL: return sp == 0 || m->s[sp - 1] == '\n';
+  case A_MEOL: return sp == m->n || m->s[sp] == '\n';
+  default: {
+    uint32_t a = prev_char(m->s, sp);
+    int l; uint32_t b = sp < m->n ? utf8_at(m->s, m->n, sp, &l) : 0xFFFFFFFFu;
+    int wa = a != 0xFFFFFFFFu && re_word(a), wb = b != 0xFFFFFFFFu && re_word(b);
+    return (wa != wb) == (kind == A_WORDB);
+  }
+  }
+}
+static void radd(RVM* m, int32_t* pcs, int64_t* caps, int* cnt, int pc, int64_t* cur, int64_t sp) {
+  if (m->mark[pc] == m->gen) return;
+  m->mark[pc] = m->gen;
+  const RInst* ins = &m->in[pc];
+  switch (ins->op) {
+  case R_JMP: radd(m, pcs, caps, cnt, ins->x, cur, sp); return;
+  case R_SPLIT: radd(m, pcs, caps, cnt, ins->x, cur, sp); radd(m, pcs, caps, cnt, ins->y, cur, sp); return;
+  case R_SAVE: { int64_t old = cur[ins->x]; cur[ins->x] = sp; radd(m, pcs, caps, cnt, pc + 1, cur, sp); cur[ins->x] = old; return; }
+  case R_ASSERT: if (rassert(m, ins->x, sp)) radd(m, pcs, caps, cnt, pc + 1, cur, sp); return;
+  default: {
+    int nc = m->h->ncap;
+    pcs[*cnt] = pc;
+    memcpy(caps + (size_t)*cnt * (size_t)nc, cur, (size_t)nc * sizeof(int64_t));
+    (*cnt)++;
+  }
+  }
+}
+/* leftmost-first search from byte offset `start`; fills out[0..ncap) with byte offsets (-1 unset) */
+static int rvm_search(RVM* m, int64_t start, int64_t* out) {
+  int nc = m->h->ncap, matched = 0;
+  m->cn = 0;
+  m->gen++;
+  for (int64_t sp = start;;) {
+    if (!matched) {
+      for (int k = 0; k < nc; k++) m->tmp[k] = -1;
+      radd(m, m->cpc, m->ccap, &m->cn, 0, m->tmp, sp);
+    }
+    if (m->cn == 0) {
+      /* nothing alive here: try the next start position */
+      if (matched || sp >= m->n) break;
+      int l; utf8_at(m->s, m->n, sp, &l);
+      sp += l;
+      m->gen++;
+      continue;
+    }
+    int l = 0; uint32_t c = 0;
+    if (sp < m->n) c = utf8_at(m->s, m->n, sp, &l);
+    m->gen++;
+    m->nn = 0;
+    for (int i = 0; i < m->cn; i++) {
+      const RInst* ins = &m->in[m->cpc[i]];
+      int64_t* tc = m->ccap + (size_t)i * (size_t)nc;
+      int ok = 0;
+      switch (ins->op) {
+      case R_MATCH: memcpy(out, tc, (size_t)nc * sizeof(int64_t)); matched = 1; i = m->cn; continue;
+      case R_CHAR: ok = sp < m->n && (ins->y ? fold_lower(c) : c) == (uint32_t)ins->x; break;
+      case R_ANY: ok = sp < m->n && (ins->x || c != '\n'); break;
+      case R_CLASS: ok = sp < m->n && rclass(m, ins, c); break;
+      }
+      if (ok) radd(m, m->npc, m->ncapv, &m->nn, m->cpc[i] + 1, tc, sp + l);
+    }
+    int32_t* tp = m->cpc; m->cpc = m->npc; m->npc = tp;
+    int64_t* tcap = m->ccap; m->ccap = m->ncapv; m->ncapv = tcap;
+    m->cn = m->nn;
+    if (sp >= m->n) {
+      /* threads that consumed nothing cannot exist past the end; run one last step for MATCH */
+      if (m->cn == 0) break;
+      for (int i = 0; i < m->cn; i++) if (m->in[m->cpc[i]].op == R_MATCH) { memcpy(out, m->ccap + (size_t)i * (size_t)nc, (size_t)nc * sizeof(int64_t)); matched = 1; break; }
+      break;
+    }
+    sp += l;
+  }
+  return matched;
+}
+/* iterate matches the way find_all/split/replace_all see them (empty matches never touch the previous one) */
+typedef struct RIter { RVM* m; int64_t pos, last_end; int64_t* caps; } RIter;
+static int riter_next(RIter* it) {
+  while (it->pos <= it->m->n) {
+    if (!rvm_search(it->m, it->pos, it->caps)) return 0;
+    int64_t s = it->caps[0], e = it->caps[1];
+    if (s == e && s == it->last_end) {
+      if (s >= it->m->n) return 0;
+      int l; utf8_at(it->m->s, it->m->n, s, &l);
+      it->pos = s + l;
+      continue;
+    }
+    it->last_end = e;
+    if (e > s) it->pos = e;
+    else { if (e >= it->m->n) it->pos = e + 1; else { int l; utf8_at(it->m->s, it->m->n, e, &l); it->pos = e + l; } }
+    return 1;
+  }
+  return 0;
+}
+static V make_match(RVM* m, const int64_t* caps, int64_t* cur_off, int64_t* cur_chars) {
+  int ng = m->h->ncap / 2 - 1;
+  *cur_chars += chars_before(m->s + *cur_off, caps[0] - *cur_off);
+  *cur_off = caps[0];
+  int64_t sc = *cur_chars;
+  int64_t ec = sc + chars_before(m->s + caps[0], caps[1] - caps[0]);
+  V groups = list_new(ng);
+  for (int g = 1; g <= ng; g++) {
+    int64_t a = caps[2 * g], b = caps[2 * g + 1];
+    lpush(groups, a >= 0 && b >= a ? d_some(d_str_new(m->s + a, b - a)) : d_none());
+  }
+  V f[4] = {d_str_new(m->s + caps[0], caps[1] - caps[0]), d_int(sc), d_int(ec), groups};
+  return d_adt(&d_td_re_Match, 0, 4, f);
+}
+static RVM* rvm_on(V rx, V text) { RVM* m = rvm_new(rx); m->s = S(text)->p; m->n = S(text)->len; return m; }
+V d_n_re_Regex_pattern(V rx) { V p = d_retain(A(rx)->f[0]); d_release(rx); return p; }
+V d_n_re_Regex_is_match(V rx, V text) {
+  RVM* m = rvm_on(rx, text);
+  int64_t* caps = xmalloc((size_t)m->h->ncap * sizeof(int64_t));
+  int ok = rvm_search(m, 0, caps);
+  free(caps); rvm_free(m); d_release(rx); d_release(text);
+  return d_bool(ok);
+}
+V d_n_re_Regex_find(V rx, V text) {
+  RVM* m = rvm_on(rx, text);
+  int64_t* caps = xmalloc((size_t)m->h->ncap * sizeof(int64_t));
+  V out = d_none();
+  if (rvm_search(m, 0, caps)) { int64_t o = 0, c = 0; out = d_some(make_match(m, caps, &o, &c)); }
+  free(caps); rvm_free(m); d_release(rx); d_release(text);
+  return out;
+}
+V d_n_re_Regex_find_all(V rx, V text) {
+  RVM* m = rvm_on(rx, text);
+  RIter it = {m, 0, -1, xmalloc((size_t)m->h->ncap * sizeof(int64_t))};
+  V out = list_new(0);
+  int64_t o = 0, c = 0;
+  while (riter_next(&it)) lpush(out, make_match(m, it.caps, &o, &c));
+  free(it.caps); rvm_free(m); d_release(rx); d_release(text);
+  return out;
+}
+V d_n_re_Regex_split(V rx, V text) {
+  RVM* m = rvm_on(rx, text);
+  RIter it = {m, 0, -1, xmalloc((size_t)m->h->ncap * sizeof(int64_t))};
+  V out = list_new(0);
+  int64_t from = 0;
+  while (riter_next(&it)) { lpush(out, d_str_new(m->s + from, it.caps[0] - from)); from = it.caps[1]; }
+  lpush(out, d_str_new(m->s + from, m->n - from));
+  free(it.caps); rvm_free(m); d_release(rx); d_release(text);
+  return out;
+}
+V d_n_re_Regex_replace_all(V rx, V text, V rep) {
+  RVM* m = rvm_on(rx, text);
+  int ng = m->h->ncap / 2 - 1;
+  const char* rp = S(rep)->p; int64_t rl = S(rep)->len;
+  /* validate group references once */
+  for (int64_t i = 0; i < rl; i++) {
+    if (rp[i] != '$') continue;
+    if (i + 1 < rl && rp[i + 1] == '$') { i++; continue; }
+    int g = -1;
+    if (i + 1 < rl && rp[i + 1] >= '0' && rp[i + 1] <= '9') g = rp[i + 1] - '0';
+    else if (i + 1 < rl && rp[i + 1] == '{') { char* e; long v = strtol(rp + i + 2, &e, 10); if (e != rp + i + 2 && *e == '}') g = (int)v; }
+    if (g < 0) d_panic_c("re.replace_all: `$` must be followed by a group number (`$1`, `${12}`); write `$$` for a dollar sign");
+    if (g > ng) panicf("re.replace_all: the replacement uses group $%d but the regex has %d group(s)", g, ng);
+  }
+  RIter it = {m, 0, -1, xmalloc((size_t)m->h->ncap * sizeof(int64_t))};
+  DBuf b; d_buf_init(&b);
+  int64_t from = 0;
+  while (riter_next(&it)) {
+    d_buf_add(&b, m->s + from, it.caps[0] - from);
+    for (int64_t i = 0; i < rl; i++) {
+      if (rp[i] != '$') { buf_ch(&b, rp[i]); continue; }
+      if (rp[i + 1] == '$') { buf_ch(&b, '$'); i++; continue; }
+      int g;
+      if (rp[i + 1] == '{') { char* e; g = (int)strtol(rp + i + 2, &e, 10); i = e - rp; }
+      else { g = rp[i + 1] - '0'; i++; }
+      int64_t a = it.caps[2 * g], z = it.caps[2 * g + 1];
+      if (a >= 0 && z >= a) d_buf_add(&b, m->s + a, z - a);
+    }
+    from = it.caps[1];
+  }
+  d_buf_add(&b, m->s + from, m->n - from);
+  free(it.caps); rvm_free(m); d_release(rx); d_release(text); d_release(rep);
+  return d_buf_done(&b);
+}
+V d_n_re_escape(V text) {
+  DBuf b; d_buf_init(&b);
+  for (int64_t i = 0; i < S(text)->len; i++) {
+    char c = S(text)->p[i];
+    if (strchr("\\.+*?()|[]{}^$#&-~", c) && c) buf_ch(&b, '\\');
+    buf_ch(&b, c);
+  }
+  d_release(text);
+  return d_buf_done(&b);
+}
+
+/* ------------------------------------------------------------------ html
+   The tree lives flat in one Bytes value (header, nodes, attributes, string pool with the source),
+   nodes in document order, so a Node is just (Document, index) and descendants are a contiguous range. */
+
+enum { HK_DOC, HK_ELEM, HK_TEXT, HK_COMMENT };
+#define HTML_MAX_DEPTH 512
+typedef struct HNode {
+  int32_t kind, parent, next, prev, first, last, end, attr0, nattr, name_len;
+  int64_t name_off, text_off, text_len, src_lo, src_hi, in_lo, in_hi;
+} HNode;
+typedef struct HAttr { int64_t name_off, val_off; int32_t name_len, pad; int64_t val_len; } HAttr;
+typedef struct HHead { int64_t nnodes, nattrs, pool_off, src_off, src_len; } HHead;
+
+typedef struct HB { HNode* nd; int64_t nn, cn; HAttr* at; int64_t na, ca; DBuf pool; int32_t stack[HTML_MAX_DEPTH + 1]; int sp; const char* s; int64_t n; } HB;
+
+static const struct { const char* n; uint32_t c; } html_ents[] = {
+  {"amp", '&'}, {"lt", '<'}, {"gt", '>'}, {"quot", '"'}, {"apos", '\''}, {"nbsp", 0xA0}, {"copy", 0xA9}, {"reg", 0xAE},
+  {"trade", 0x2122}, {"euro", 0x20AC}, {"cent", 0xA2}, {"pound", 0xA3}, {"yen", 0xA5}, {"sect", 0xA7}, {"deg", 0xB0},
+  {"plusmn", 0xB1}, {"middot", 0xB7}, {"times", 0xD7}, {"divide", 0xF7}, {"laquo", 0xAB}, {"raquo", 0xBB},
+  {"iexcl", 0xA1}, {"iquest", 0xBF}, {"ordf", 0xAA}, {"ordm", 0xBA}, {"sup2", 0xB2}, {"sup3", 0xB3}, {"frac12", 0xBD},
+  {"ndash", 0x2013}, {"mdash", 0x2014}, {"lsquo", 0x2018}, {"rsquo", 0x2019}, {"ldquo", 0x201C}, {"rdquo", 0x201D},
+  {"sbquo", 0x201A}, {"bdquo", 0x201E}, {"bull", 0x2022}, {"hellip", 0x2026}, {"prime", 0x2032}, {"larr", 0x2190},
+  {"rarr", 0x2192}, {"uarr", 0x2191}, {"darr", 0x2193}, {"hearts", 0x2665}, {"check", 0x2713}, {"shy", 0xAD},
+  {"Aacute", 0xC1}, {"Eacute", 0xC9}, {"Iacute", 0xCD}, {"Oacute", 0xD3}, {"Uacute", 0xDA}, {"Ntilde", 0xD1}, {"Uuml", 0xDC},
+  {"aacute", 0xE1}, {"eacute", 0xE9}, {"iacute", 0xED}, {"oacute", 0xF3}, {"uacute", 0xFA}, {"ntilde", 0xF1}, {"uuml", 0xFC},
+  {"Agrave", 0xC0}, {"Egrave", 0xC8}, {"agrave", 0xE0}, {"egrave", 0xE8}, {"igrave", 0xEC}, {"ograve", 0xF2}, {"ugrave", 0xF9},
+  {"acirc", 0xE2}, {"ecirc", 0xEA}, {"ocirc", 0xF4}, {"atilde", 0xE3}, {"otilde", 0xF5}, {"auml", 0xE4}, {"euml", 0xEB},
+  {"iuml", 0xEF}, {"ouml", 0xF6}, {"Auml", 0xC4}, {"Ouml", 0xD6}, {"ccedil", 0xE7}, {"Ccedil", 0xC7}, {"szlig", 0xDF},
+  {"aring", 0xE5}, {"oslash", 0xF8}, {"aelig", 0xE6}, {"zwj", 0x200D}, {"zwnj", 0x200C}, {"thinsp", 0x2009},
+  {"ensp", 0x2002}, {"emsp", 0x2003}, {"lrm", 0x200E}, {"rlm", 0x200F},
+};
+/* decode entities of s[0..n) into b */
+static void html_decode(DBuf* b, const char* s, int64_t n) {
+  for (int64_t i = 0; i < n;) {
+    if (s[i] != '&') {
+      const char* amp = memchr(s + i, '&', (size_t)(n - i));
+      int64_t e = amp ? amp - s : n;
+      d_buf_add(b, s + i, e - i);
+      i = e;
+      continue;
+    }
+    int64_t j = i + 1;
+    if (j < n && s[j] == '#') {
+      j++;
+      int hex = j < n && (s[j] == 'x' || s[j] == 'X');
+      if (hex) j++;
+      int64_t st = j; uint32_t v = 0; int big = 0;
+      while (j < n && (hex ? hexdig((unsigned char)s[j]) >= 0 : (s[j] >= '0' && s[j] <= '9'))) { v = v * (hex ? 16 : 10) + (uint32_t)(hex ? hexdig((unsigned char)s[j]) : s[j] - '0'); if (v > 0x10FFFF) big = 1; j++; }
+      if (j > st) {
+        if (j < n && s[j] == ';') j++;
+        if (big || v == 0 || (v >= 0xD800 && v <= 0xDFFF)) v = 0xFFFD;
+        utf8_put(b, v);
+        i = j;
+        continue;
+      }
+    } else {
+      int64_t st = j;
+      while (j < n && j - st < 32 && ((s[j] >= 'a' && s[j] <= 'z') || (s[j] >= 'A' && s[j] <= 'Z') || (s[j] >= '0' && s[j] <= '9'))) j++;
+      int semi = j < n && s[j] == ';';
+      for (size_t k = 0; k < sizeof html_ents / sizeof html_ents[0]; k++) {
+        size_t l = strlen(html_ents[k].n);
+        if ((int64_t)l == j - st && !memcmp(s + st, html_ents[k].n, l) && (semi || k < 8)) {
+          utf8_put(b, html_ents[k].c);
+          i = j + semi;
+          goto next;
+        }
+      }
+    }
+    buf_ch(b, '&');
+    i++;
+  next:;
+  }
+}
+static int64_t hpool(HB* h, const char* s, int64_t n) { int64_t o = h->pool.len; d_buf_add(&h->pool, s, n); return o; }
+static int32_t hnode(HB* h, int kind) {
+  if (h->nn == h->cn) { h->cn = h->cn ? h->cn * 2 : 64; h->nd = xrealloc(h->nd, (size_t)h->cn * sizeof(HNode)); }
+  HNode* x = &h->nd[h->nn];
+  memset(x, 0, sizeof *x);
+  x->kind = kind; x->parent = x->next = x->prev = x->first = x->last = -1; x->end = (int32_t)h->nn;
+  int32_t id = (int32_t)h->nn++;
+  if (h->sp >= 0) {
+    int32_t p = h->stack[h->sp];
+    x = &h->nd[id];
+    x->parent = p;
+    if (h->nd[p].last >= 0) { h->nd[h->nd[p].last].next = id; x->prev = h->nd[p].last; } else h->nd[p].first = id;
+    h->nd[p].last = id;
+  }
+  return id;
+}
+static int hname_is(HB* h, int32_t id, const char* name) {
+  HNode* x = &h->nd[id];
+  return x->kind == HK_ELEM && (size_t)x->name_len == strlen(name) && !memcmp(h->pool.p + x->name_off, name, (size_t)x->name_len);
+}
+static int name_in(const char* name, int64_t l, const char* list) {
+  /* list: space-separated, with spaces at both ends */
+  char key[40];
+  if (l <= 0 || l > 30) return 0;
+  key[0] = ' '; memcpy(key + 1, name, (size_t)l); key[l + 1] = ' '; key[l + 2] = 0;
+  return strstr(list, key) != NULL;
+}
+static int hnode_in(HB* h, int32_t id, const char* list) { HNode* x = &h->nd[id]; return x->kind == HK_ELEM && name_in(h->pool.p + x->name_off, x->name_len, list); }
+static void hpop(HB* h, int64_t at) {
+  int32_t id = h->stack[h->sp--];
+  HNode* x = &h->nd[id];
+  x->end = (int32_t)h->nn - 1;
+  if (!x->src_hi) { x->src_hi = at; x->in_hi = at; }
+}
+/* pop up to and including the nearest open element named in `targets`, unless a `stops` element comes first */
+static void hclose_nearest(HB* h, const char* targets, const char* stops, int64_t at) {
+  for (int k = h->sp; k > 0; k--) {
+    int32_t id = h->stack[k];
+    if (hnode_in(h, id, targets)) { while (h->sp >= k) hpop(h, at); return; }
+    if (hnode_in(h, id, stops)) return;
+  }
+}
+static const char* const H_VOID = " area base br col embed hr img input link meta param source track wbr ";
+static const char* const H_PCLOSE = " address article aside blockquote details dialog div dl fieldset figcaption figure footer form h1 h2 h3 h4 h5 h6 header hgroup hr main menu nav ol p pre section table ul li dd dt ";
+static const char* const H_SCOPE = " html body table td th caption button template object ";
+static void himplied(HB* h, const char* t, int64_t l, int64_t at) {
+  if (name_in(t, l, H_PCLOSE)) hclose_nearest(h, " p ", H_SCOPE, at);
+  if (name_in(t, l, " li ")) hclose_nearest(h, " li ", " ul ol table td th html body ", at);
+  else if (name_in(t, l, " dt dd ")) hclose_nearest(h, " dt dd ", " dl table td th html body ", at);
+  else if (name_in(t, l, " option ")) { if (h->sp > 0 && hnode_in(h, h->stack[h->sp], " option ")) hpop(h, at); }
+  else if (name_in(t, l, " optgroup ")) hclose_nearest(h, " option optgroup ", " select ", at);
+  else if (name_in(t, l, " tr ")) hclose_nearest(h, " tr ", " table thead tbody tfoot ", at);
+  else if (name_in(t, l, " td th ")) hclose_nearest(h, " td th ", " tr table ", at);
+  else if (name_in(t, l, " thead tbody tfoot ")) hclose_nearest(h, " thead tbody tfoot ", " table ", at);
+  else if (name_in(t, l, " h1 h2 h3 h4 h5 h6 ")) { if (h->sp > 0 && hnode_in(h, h->stack[h->sp], " h1 h2 h3 h4 h5 h6 ")) hpop(h, at); }
+  else if (name_in(t, l, " a ")) hclose_nearest(h, " a ", " table td th button ", at);
+}
+static void htext(HB* h, const char* s, int64_t n, int decode, int64_t lo) {
+  if (n <= 0) return;
+  int32_t p = h->stack[h->sp];
+  int32_t last = h->nd[p].last;
+  int64_t off = h->pool.len;
+  if (decode) html_decode(&h->pool, s, n); else d_buf_add(&h->pool, s, n);
+  int64_t len = h->pool.len - off;
+  if (last >= 0 && h->nd[last].kind == HK_TEXT && h->nd[last].text_off + h->nd[last].text_len == off) {
+    h->nd[last].text_len += len; h->nd[last].src_hi = lo + n;
+    return;
+  }
+  int32_t id = hnode(h, HK_TEXT);
+  h->nd[id].text_off = off; h->nd[id].text_len = len; h->nd[id].src_lo = lo; h->nd[id].src_hi = lo + n;
+}
+static int hname_char(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == ':' || c == '.'; }
+static int hws(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f'; }
+static int64_t find_ci(const char* s, int64_t n, int64_t from, const char* pat) {
+  int64_t l = (int64_t)strlen(pat);
+  for (int64_t i = from; i + l <= n; i++) if (!strncasecmp(s + i, pat, (size_t)l)) return i;
+  return -1;
+}
+static void hparse(HB* h) {
+  const char* s = h->s; int64_t n = h->n, i = 0;
+  while (i < n) {
+    if (s[i] != '<') {
+      const char* lt = memchr(s + i, '<', (size_t)(n - i));
+      int64_t e = lt ? lt - s : n;
+      htext(h, s + i, e - i, 1, i);
+      i = e;
+      continue;
+    }
+    if (i + 3 < n && !strncmp(s + i, "<!--", 4)) {
+      int64_t e = find_ci(s, n, i + 4, "-->");
+      int64_t ce = e < 0 ? n : e;
+      int32_t id = hnode(h, HK_COMMENT);
+      h->nd[id].text_off = hpool(h, s + i + 4, ce - i - 4); h->nd[id].text_len = ce - i - 4;
+      h->nd[id].src_lo = i; i = e < 0 ? n : e + 3; h->nd[id].src_hi = i;
+      continue;
+    }
+    if (i + 1 < n && (s[i + 1] == '!' || s[i + 1] == '?')) {
+      const char* gt = memchr(s + i, '>', (size_t)(n - i));
+      i = gt ? gt - s + 1 : n;
+      continue;
+    }
+    if (i + 2 < n && s[i + 1] == '/' && ((s[i + 2] | 32) >= 'a' && (s[i + 2] | 32) <= 'z')) {
+      int64_t ns = i + 2, ne = ns;
+      while (ne < n && hname_char(s[ne])) ne++;
+      char name[64]; int64_t nl = ne - ns < 63 ? ne - ns : 63;
+      for (int64_t k = 0; k < nl; k++) name[k] = (char)((s[ns + k] >= 'A' && s[ns + k] <= 'Z') ? s[ns + k] + 32 : s[ns + k]);
+      name[nl] = 0;
+      const char* gt = memchr(s + ne, '>', (size_t)(n - ne));
+      int64_t after = gt ? gt - s + 1 : n;
+      for (int k = h->sp; k > 0; k--) {
+        int32_t id = h->stack[k];
+        if (hname_is(h, id, name)) {
+          while (h->sp > k) hpop(h, i);
+          h->nd[id].in_hi = i; h->nd[id].src_hi = after;
+          hpop(h, after);
+          break;
+        }
+        if (name_in(name, nl, " p li dd dt ") ? hnode_in(h, id, H_SCOPE) : 0) break;
+      }
+      i = after;
+      continue;
+    }
+    if (i + 1 < n && ((s[i + 1] | 32) >= 'a' && (s[i + 1] | 32) <= 'z')) {
+      int64_t lo = i, ns = i + 1, ne = ns;
+      while (ne < n && hname_char(s[ne])) ne++;
+      char name[64]; int64_t nl = ne - ns < 63 ? ne - ns : 63;
+      for (int64_t k = 0; k < nl; k++) name[k] = (char)((s[ns + k] >= 'A' && s[ns + k] <= 'Z') ? s[ns + k] + 32 : s[ns + k]);
+      name[nl] = 0;
+      himplied(h, name, nl, lo);
+      int32_t id = hnode(h, HK_ELEM);
+      h->nd[id].name_off = hpool(h, name, nl); h->nd[id].name_len = (int32_t)nl; h->nd[id].src_lo = lo;
+      h->nd[id].attr0 = (int32_t)h->na;
+      int64_t j = ne; int selfclose = 0;
+      for (;;) {
+        while (j < n && (hws(s[j]) || s[j] == '/')) { if (s[j] == '/' && j + 1 < n && s[j + 1] == '>') selfclose = 1; j++; }
+        if (j >= n || s[j] == '>') { if (j < n) j++; break; }
+        int64_t as = j;
+        while (j < n && !hws(s[j]) && s[j] != '=' && s[j] != '>' && !(s[j] == '/' && j + 1 < n && s[j + 1] == '>')) j++;
+        if (j == as) { j++; continue; }
+        int64_t ae = j;
+        while (j < n && hws(s[j])) j++;
+        int64_t vs = 0, ve = 0; int has_v = 0;
+        if (j < n && s[j] == '=') {
+          j++;
+          while (j < n && hws(s[j])) j++;
+          if (j < n && (s[j] == '"' || s[j] == '\'')) {
+            char q = s[j++]; vs = j;
+            const char* qe = memchr(s + j, q, (size_t)(n - j));
+            ve = qe ? qe - s : n; j = qe ? ve + 1 : n;
+          } else { vs = j; while (j < n && !hws(s[j]) && s[j] != '>') j++; ve = j; }
+          has_v = 1;
+        }
+        /* duplicate attributes: the first one wins */
+        int dup = 0;
+        for (int64_t k = h->nd[id].attr0; k < h->na && !dup; k++)
+          if (h->at[k].name_len == ae - as && !strncasecmp(h->pool.p + h->at[k].name_off, s + as, (size_t)(ae - as))) dup = 1;
+        if (dup) continue;
+        if (h->na == h->ca) { h->ca = h->ca ? h->ca * 2 : 64; h->at = xrealloc(h->at, (size_t)h->ca * sizeof(HAttr)); }
+        HAttr* a = &h->at[h->na++];
+        memset(a, 0, sizeof *a);
+        a->name_off = hpool(h, s + as, ae - as); a->name_len = (int32_t)(ae - as);
+        lower_ascii(h->pool.p + a->name_off, ae - as);
+        a->val_off = h->pool.len;
+        if (has_v) html_decode(&h->pool, s + vs, ve - vs);
+        a->val_len = h->pool.len - a->val_off;
+      }
+      h->nd[id].nattr = (int32_t)(h->na - h->nd[id].attr0);
+      h->nd[id].in_lo = j;
+      if (name_in(name, nl, H_VOID) || (selfclose && !name_in(name, nl, " script style textarea title div span p a li ul ol table td tr "))) {
+        h->nd[id].src_hi = h->nd[id].in_hi = j;
+        i = j;
+        continue;
+      }
+      if (name_in(name, nl, " script style textarea title xmp ")) {
+        char close[72]; snprintf(close, sizeof close, "</%s", name);
+        int64_t e = find_ci(s, n, j, close);
+        int64_t ce = e < 0 ? n : e;
+        if (h->sp < HTML_MAX_DEPTH) {
+          h->stack[++h->sp] = id;
+          htext(h, s + j, ce - j, !name_in(name, nl, " script style xmp "), j);
+          h->nd[id].in_hi = ce;
+          const char* gt = e < 0 ? NULL : memchr(s + ce, '>', (size_t)(n - ce));
+          i = gt ? gt - s + 1 : n;
+          h->nd[id].src_hi = i;
+          hpop(h, i);
+        } else i = ce;
+        continue;
+      }
+      if (h->sp < HTML_MAX_DEPTH) h->stack[++h->sp] = id;
+      i = j;
+      continue;
+    }
+    htext(h, s + i, 1, 0, i);
+    i++;
+  }
+  while (h->sp > 0) hpop(h, n);
+  h->nd[0].end = (int32_t)h->nn - 1;
+}
+V d_n_html_parse(V src) {
+  HB h; memset(&h, 0, sizeof h);
+  h.s = S(src)->p; h.n = S(src)->len;
+  d_buf_init(&h.pool);
+  h.sp = -1;
+  int32_t root = hnode(&h, HK_DOC);
+  h.stack[0] = root; h.sp = 0;
+  h.nd[root].src_hi = h.nd[root].in_hi = h.n;
+  int64_t src_off = hpool(&h, h.s, h.n);
+  hparse(&h);
+  HHead hd = {h.nn, h.na, 0, src_off, h.n};
+  int64_t sz = (int64_t)sizeof hd + h.nn * (int64_t)sizeof(HNode) + h.na * (int64_t)sizeof(HAttr);
+  hd.pool_off = sz;
+  V blob = str_alloc(K_BYTES, sz + h.pool.len);
+  char* q = S(blob)->p;
+  memcpy(q, &hd, sizeof hd);
+  memcpy(q + sizeof hd, h.nd, (size_t)h.nn * sizeof(HNode));
+  if (h.na) memcpy(q + sizeof hd + (size_t)h.nn * sizeof(HNode), h.at, (size_t)h.na * sizeof(HAttr));
+  memcpy(q + sz, h.pool.p, (size_t)h.pool.len);
+  free(h.nd); free(h.at); free(h.pool.p);
+  d_release(src);
+  return d_adt(&d_td_html_Document, 0, 1, &blob);
+}
+
+/* ---- reading the flat tree */
+typedef struct HT { const HHead* h; const HNode* nd; const HAttr* at; const char* pool; } HT;
+static HT html_tree(V doc) {
+  const char* p = S(A(doc)->f[0])->p;
+  HT t;
+  t.h = (const HHead*)p;
+  t.nd = (const HNode*)(p + sizeof(HHead));
+  t.at = (const HAttr*)(p + sizeof(HHead) + (size_t)t.h->nnodes * sizeof(HNode));
+  t.pool = p + t.h->pool_off;
+  return t;
+}
+static int ht_name(const HT* t, int32_t id, const char* name, int64_t l) {
+  const HNode* x = &t->nd[id];
+  return x->kind == HK_ELEM && x->name_len == l && !memcmp(t->pool + x->name_off, name, (size_t)l);
+}
+static const HAttr* ht_attr(const HT* t, int32_t id, const char* name, int64_t l) {
+  const HNode* x = &t->nd[id];
+  for (int k = 0; k < x->nattr; k++) {
+    const HAttr* a = &t->at[x->attr0 + k];
+    if (a->name_len == l && !strncasecmp(t->pool + a->name_off, name, (size_t)l)) return a;
+  }
+  return NULL;
+}
+static V node_new(V doc, int32_t id) { V f[2] = {d_retain(doc), d_int(id)}; return d_adt(&d_td_html_Node, 0, 2, f); }
+static void html_show(DBuf* b, V v) {
+  if (A(v)->t == &d_td_html_Document) { HT t = html_tree(v); buf_fmt(b, "Document(%lld nodes)", (long long)t.h->nnodes); return; }
+  HT t = html_tree(A(v)->f[0]);
+  const HNode* x = &t.nd[A(v)->f[1].i];
+  buf_cstr(b, "Node(<");
+  d_buf_add(b, t.pool + x->name_off, x->name_len);
+  for (int k = 0; k < x->nattr && k < 3; k++) {
+    const HAttr* a = &t.at[x->attr0 + k];
+    buf_ch(b, ' '); d_buf_add(b, t.pool + a->name_off, a->name_len);
+    buf_cstr(b, "="); show_quoted(b, t.pool + a->val_off, a->val_len > 60 ? 60 : a->val_len, 0);
+  }
+  buf_cstr(b, x->nattr > 3 ? " ...>)" : ">)");
+}
+static const char* const H_BLOCK = " address article aside blockquote br dd details div dl dt fieldset figcaption figure footer form h1 h2 h3 h4 h5 h6 header hr li main nav ol option p pre section summary table tbody td tfoot th thead title tr ul ";
+static void ht_text(const HT* t, int32_t id, DBuf* b, int depth) {
+  for (int32_t c = t->nd[id].first; c >= 0; c = t->nd[c].next) {
+    const HNode* x = &t->nd[c];
+    if (x->kind == HK_TEXT) d_buf_add(b, t->pool + x->text_off, x->text_len);
+    else if (x->kind == HK_ELEM && depth < HTML_MAX_DEPTH + 2) {
+      const char* nm = t->pool + x->name_off;
+      if (name_in(nm, x->name_len, " script style template noscript head ")) continue;
+      int blk = name_in(nm, x->name_len, H_BLOCK);
+      if (blk) buf_ch(b, ' ');
+      ht_text(t, c, b, depth + 1);
+      if (blk) buf_ch(b, ' ');
+    }
+  }
+}
+static V collapse_ws(DBuf* b) {
+  DBuf o; d_buf_init(&o);
+  int pend = 0;
+  for (int64_t i = 0; i < b->len;) {
+    int l; uint32_t c = utf8_at(b->p, b->len, i, &l);
+    if (is_ws(c)) { pend = o.len > 0; i += l; continue; }
+    if (pend) { buf_ch(&o, ' '); pend = 0; }
+    d_buf_add(&o, b->p + i, l);
+    i += l;
+  }
+  free(b->p);
+  return d_buf_done(&o);
+}
+static V node_text(V doc, int32_t id) {
+  HT t = html_tree(doc);
+  DBuf b; d_buf_init(&b);
+  const HNode* x = &t.nd[id];
+  if (x->kind == HK_ELEM && name_in(t.pool + x->name_off, x->name_len, " script style title textarea ")) {
+    for (int32_t c = x->first; c >= 0; c = t.nd[c].next) if (t.nd[c].kind == HK_TEXT) d_buf_add(&b, t.pool + t.nd[c].text_off, t.nd[c].text_len);
+  } else ht_text(&t, id, &b, 0);
+  return collapse_ws(&b);
+}
+
+/* ---- CSS selectors */
+enum { SS_TAG, SS_ID, SS_CLASS, SS_ATTR, SS_FIRST, SS_LAST, SS_ONLY, SS_NTH, SS_NTHL, SS_EMPTY, SS_NOT };
+typedef struct SSim { int k; const char* name; int64_t nl; const char* val; int64_t vl; char op; int64_t a, b; int not_at; } SSim;
+#define SEL_MAX 64
+typedef struct SComp { SSim s[16]; int n; } SComp;
+typedef struct SCx { int first, n; char comb[16]; } SCx;  /* compounds first..first+n-1 */
+typedef struct Sel {
+  SComp comps[SEL_MAX]; int nc;
+  SCx cx[32]; int nx;
+  char* buf; int64_t len, i;
+  const char* src;
+} Sel;
+static _Noreturn void sel_fail(Sel* s, const char* msg) {
+  panicf("invalid CSS selector `%.200s`: %s", s->src, msg);
+}
+static void sel_ws(Sel* s) { while (s->i < s->len && hws(s->buf[s->i])) s->i++; }
+static int sel_ident_char(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || (unsigned char)c >= 0x80; }
+/* identifier in place: returns start, sets length */
+static const char* sel_ident(Sel* s, int64_t* l) {
+  int64_t st = s->i;
+  while (s->i < s->len && sel_ident_char(s->buf[s->i])) s->i++;
+  *l = s->i - st;
+  if (!*l) sel_fail(s, "expected a name");
+  return s->buf + st;
+}
+static void sel_nth(Sel* s, SSim* x) {
+  /* an+b | odd | even | n */
+  sel_ws(s);
+  int64_t st = s->i;
+  while (s->i < s->len && s->buf[s->i] != ')') s->i++;
+  if (s->i >= s->len) sel_fail(s, "missing `)`");
+  char t[64]; int64_t tl = 0;
+  for (int64_t k = st; k < s->i && tl < 63; k++) if (!hws(s->buf[k])) t[tl++] = (char)((s->buf[k] >= 'A' && s->buf[k] <= 'Z') ? s->buf[k] + 32 : s->buf[k]);
+  t[tl] = 0;
+  s->i++;
+  if (!strcmp(t, "odd")) { x->a = 2; x->b = 1; return; }
+  if (!strcmp(t, "even")) { x->a = 2; x->b = 0; return; }
+  char* np = strchr(t, 'n');
+  char* e;
+  if (!np) { x->a = 0; x->b = strtol(t, &e, 10); if (e == t || *e) sel_fail(s, "bad :nth-child argument"); return; }
+  *np = 0;
+  if (!t[0] || !strcmp(t, "+")) x->a = 1; else if (!strcmp(t, "-")) x->a = -1; else { x->a = strtol(t, &e, 10); if (*e) sel_fail(s, "bad :nth-child argument"); }
+  x->b = 0;
+  if (np[1]) { x->b = strtol(np + 1, &e, 10); if (*e || (np[1] != '+' && np[1] != '-')) sel_fail(s, "bad :nth-child argument"); }
+}
+static int sel_compound(Sel* s, int depth);
+static void sel_simple_list(Sel* s, SComp* c, int depth) {
+  int any = 0;
+  for (;;) {
+    if (s->i >= s->len) break;
+    char ch = s->buf[s->i];
+    if (c->n >= 16) sel_fail(s, "too many parts in one compound selector");
+    SSim* x = &c->s[c->n];
+    memset(x, 0, sizeof *x);
+    if (ch == '*' && !any) { s->i++; any = 1; continue; }
+    if (sel_ident_char(ch) && !any && ch != '.' && ch != ':') {
+      x->k = SS_TAG; x->name = sel_ident(s, &x->nl);
+      for (int64_t k = 0; k < x->nl; k++) if (s->buf[x->name - s->buf + k] >= 'A' && s->buf[x->name - s->buf + k] <= 'Z') s->buf[x->name - s->buf + k] += 32;
+      c->n++; any = 1; continue;
+    }
+    any = 1;
+    if (ch == '#') { s->i++; x->k = SS_ID; x->val = sel_ident(s, &x->vl); c->n++; continue; }
+    if (ch == '.') { s->i++; x->k = SS_CLASS; x->val = sel_ident(s, &x->vl); c->n++; continue; }
+    if (ch == '[') {
+      s->i++; sel_ws(s);
+      x->k = SS_ATTR; x->name = sel_ident(s, &x->nl);
+      sel_ws(s);
+      if (s->i < s->len && s->buf[s->i] != ']') {
+        char o = s->buf[s->i];
+        if (o == '=') { x->op = '='; s->i++; }
+        else if (strchr("~^$*|", o) && s->i + 1 < s->len && s->buf[s->i + 1] == '=') { x->op = o; s->i += 2; }
+        else sel_fail(s, "bad attribute operator (use = ~= ^= $= *= |=)");
+        sel_ws(s);
+        if (s->i < s->len && (s->buf[s->i] == '"' || s->buf[s->i] == '\'')) {
+          char q = s->buf[s->i++];
+          int64_t st = s->i, w = s->i;
+          while (s->i < s->len && s->buf[s->i] != q) {
+            if (s->buf[s->i] == '\\' && s->i + 1 < s->len) s->i++;
+            s->buf[w++] = s->buf[s->i++];
+          }
+          if (s->i >= s->len) sel_fail(s, "unterminated string");
+          s->i++;
+          x->val = s->buf + st; x->vl = w - st;
+        } else x->val = sel_ident(s, &x->vl);
+        sel_ws(s);
+      }
+      if (s->i >= s->len || s->buf[s->i] != ']') sel_fail(s, "missing `]`");
+      s->i++;
+      c->n++;
+      continue;
+    }
+    if (ch == ':') {
+      s->i++;
+      if (s->i < s->len && s->buf[s->i] == ':') sel_fail(s, "pseudo-elements (::) select nothing in a parsed document");
+      int64_t l; const char* nm = sel_ident(s, &l);
+#define IS(w) (l == (int64_t)strlen(w) && !strncasecmp(nm, w, (size_t)l))
+      if (IS("first-child")) x->k = SS_FIRST;
+      else if (IS("last-child")) x->k = SS_LAST;
+      else if (IS("only-child")) x->k = SS_ONLY;
+      else if (IS("empty")) x->k = SS_EMPTY;
+      else if (IS("nth-child") || IS("nth-last-child")) {
+        x->k = IS("nth-child") ? SS_NTH : SS_NTHL;
+        if (s->i >= s->len || s->buf[s->i] != '(') sel_fail(s, "expected `(` after :nth-child");
+        s->i++;
+        sel_nth(s, x);
+      } else if (IS("not")) {
+        if (s->i >= s->len || s->buf[s->i] != '(') sel_fail(s, "expected `(` after :not");
+        if (depth > 3) sel_fail(s, ":not nested too deeply");
+        s->i++; sel_ws(s);
+        x->k = SS_NOT;
+        c->n++;
+        x->not_at = sel_compound(s, depth + 1);
+        sel_ws(s);
+        if (s->i >= s->len || s->buf[s->i] != ')') sel_fail(s, ":not takes one compound selector such as `:not(.ad)`");
+        s->i++;
+        continue;
+      } else sel_fail(s, "unsupported pseudo-class (supported: first-child last-child only-child nth-child nth-last-child empty not)");
+#undef IS
+      c->n++;
+      continue;
+    }
+    break;
+  }
+  if (!any) sel_fail(s, "expected a selector");
+}
+static int sel_compound(Sel* s, int depth) {
+  if (s->nc >= SEL_MAX) sel_fail(s, "selector too long");
+  int id = s->nc++;
+  s->comps[id].n = 0;
+  sel_simple_list(s, &s->comps[id], depth);
+  return id;
+}
+static void sel_parse(Sel* s) {
+  for (;;) {
+    sel_ws(s);
+    if (s->nx >= 32) sel_fail(s, "too many selectors in the group");
+    SCx* x = &s->cx[s->nx++];
+    x->n = 0;
+    char comb = 0;
+    for (;;) {
+      if (x->n >= 16) sel_fail(s, "too many combinators");
+      x->comb[x->n] = comb;
+      int c = sel_compound(s, 0);
+      if (x->n == 0) x->first = c;
+      x->n++;
+      int had_ws = s->i < s->len && hws(s->buf[s->i]);
+      sel_ws(s);
+      if (s->i >= s->len || s->buf[s->i] == ',') break;
+      char ch = s->buf[s->i];
+      if (ch == '>' || ch == '+' || ch == '~') { comb = ch; s->i++; sel_ws(s); }
+      else if (had_ws) comb = ' ';
+      else sel_fail(s, "unexpected character");
+      if (s->i >= s->len) sel_fail(s, "a combinator needs a selector after it");
+    }
+    if (s->i >= s->len) break;
+    s->i++; /* , */
+  }
+}
+static int32_t prev_elem(const HT* t, int32_t id) { for (int32_t p = t->nd[id].prev; p >= 0; p = t->nd[p].prev) if (t->nd[p].kind == HK_ELEM) return p; return -1; }
+static int32_t next_elem(const HT* t, int32_t id) { for (int32_t p = t->nd[id].next; p >= 0; p = t->nd[p].next) if (t->nd[p].kind == HK_ELEM) return p; return -1; }
+static int nth_ok(int64_t a, int64_t b, int64_t pos) {
+  if (a == 0) return pos == b;
+  int64_t d = pos - b;
+  return d % a == 0 && d / a >= 0;
+}
+static int word_in(const char* list, int64_t ll, const char* w, int64_t wl) {
+  for (int64_t i = 0; i < ll;) {
+    while (i < ll && hws(list[i])) i++;
+    int64_t st = i;
+    while (i < ll && !hws(list[i])) i++;
+    if (i - st == wl && wl && !memcmp(list + st, w, (size_t)wl)) return 1;
+  }
+  return 0;
+}
+static int match_comp(const Sel* s, const HT* t, int ci, int32_t id) {
+  const SComp* c = &s->comps[ci];
+  const HNode* x = &t->nd[id];
+  if (x->kind != HK_ELEM) return 0;
+  for (int k = 0; k < c->n; k++) {
+    const SSim* q = &c->s[k];
+    switch (q->k) {
+    case SS_TAG: if (!ht_name(t, id, q->name, q->nl)) return 0; break;
+    case SS_ID: { const HAttr* a = ht_attr(t, id, "id", 2); if (!a || a->val_len != q->vl || memcmp(t->pool + a->val_off, q->val, (size_t)q->vl)) return 0; break; }
+    case SS_CLASS: { const HAttr* a = ht_attr(t, id, "class", 5); if (!a || !word_in(t->pool + a->val_off, a->val_len, q->val, q->vl)) return 0; break; }
+    case SS_ATTR: {
+      const HAttr* a = ht_attr(t, id, q->name, q->nl);
+      if (!a) return 0;
+      if (!q->op) break;
+      const char* v = t->pool + a->val_off; int64_t vl = a->val_len;
+      int ok;
+      switch (q->op) {
+      case '=': ok = vl == q->vl && !memcmp(v, q->val, (size_t)vl); break;
+      case '~': ok = word_in(v, vl, q->val, q->vl); break;
+      case '^': ok = q->vl && vl >= q->vl && !memcmp(v, q->val, (size_t)q->vl); break;
+      case '$': ok = q->vl && vl >= q->vl && !memcmp(v + vl - q->vl, q->val, (size_t)q->vl); break;
+      case '*': ok = q->vl && memmem(v, (size_t)vl, q->val, (size_t)q->vl) != NULL; break;
+      default: ok = (vl == q->vl && !memcmp(v, q->val, (size_t)vl)) || (vl > q->vl && !memcmp(v, q->val, (size_t)q->vl) && v[q->vl] == '-');
+      }
+      if (!ok) return 0;
+      break;
+    }
+    case SS_FIRST: if (prev_elem(t, id) >= 0) return 0; break;
+    case SS_LAST: if (next_elem(t, id) >= 0) return 0; break;
+    case SS_ONLY: if (prev_elem(t, id) >= 0 || next_elem(t, id) >= 0) return 0; break;
+    case SS_EMPTY: for (int32_t ch = x->first; ch >= 0; ch = t->nd[ch].next) if (t->nd[ch].kind == HK_ELEM || (t->nd[ch].kind == HK_TEXT && t->nd[ch].text_len)) return 0; break;
+    case SS_NTH: case SS_NTHL: {
+      int64_t pos = 1;
+      for (int32_t p = q->k == SS_NTH ? prev_elem(t, id) : next_elem(t, id); p >= 0; p = q->k == SS_NTH ? prev_elem(t, p) : next_elem(t, p)) pos++;
+      if (!nth_ok(q->a, q->b, pos)) return 0;
+      break;
+    }
+    case SS_NOT: if (match_comp(s, t, q->not_at, id)) return 0; break;
+    }
+  }
+  return 1;
+}
+static int32_t parent_elem(const HT* t, int32_t id) { int32_t p = t->nd[id].parent; return p >= 0 && t->nd[p].kind == HK_ELEM ? p : -1; }
+static int match_cx(const Sel* s, const HT* t, const SCx* x, int k, int32_t id) {
+  if (!match_comp(s, t, x->first + k, id)) return 0;
+  if (k == 0) return 1;
+  switch (x->comb[k]) {
+  case '>': { int32_t p = parent_elem(t, id); return p >= 0 && match_cx(s, t, x, k - 1, p); }
+  case '+': { int32_t p = prev_elem(t, id); return p >= 0 && match_cx(s, t, x, k - 1, p); }
+  case '~': for (int32_t p = prev_elem(t, id); p >= 0; p = prev_elem(t, p)) if (match_cx(s, t, x, k - 1, p)) return 1; return 0;
+  default: for (int32_t p = parent_elem(t, id); p >= 0; p = parent_elem(t, p)) if (match_cx(s, t, x, k - 1, p)) return 1; return 0;
+  }
+}
+/* elements in (scope, end] matching css, in document order; first_only stops at one */
+static V html_select(V doc, int32_t scope, V css, int first_only) {
+  Sel* s = xmalloc(sizeof(Sel));
+  s->nc = s->nx = 0;
+  s->len = S(css)->len; s->i = 0;
+  s->buf = xmalloc((size_t)s->len + 1); memcpy(s->buf, S(css)->p, (size_t)s->len + 1);
+  s->src = S(css)->p;
+  sel_parse(s);
+  HT t = html_tree(doc);
+  V out = first_only ? d_none() : list_new(0);
+  int32_t end = t.nd[scope].end;
+  for (int32_t id = scope + 1; id <= end; id++) {
+    if (t.nd[id].kind != HK_ELEM) continue;
+    int hit = 0;
+    for (int g = 0; g < s->nx && !hit; g++) hit = match_cx(s, &t, &s->cx[g], s->cx[g].n - 1, id);
+    if (!hit) continue;
+    if (first_only) { out = d_some(node_new(doc, id)); break; }
+    lpush(out, node_new(doc, id));
+  }
+  free(s->buf); free(s);
+  return out;
+}
+V d_n_html_Document_select(V doc, V css) { V r = html_select(doc, 0, css, 0); d_release(doc); d_release(css); return r; }
+V d_n_html_Document_select_first(V doc, V css) { V r = html_select(doc, 0, css, 1); d_release(doc); d_release(css); return r; }
+V d_n_html_Document_text(V doc) { V r = node_text(doc, 0); d_release(doc); return r; }
+#define NODE_DOC(v) (A(v)->f[0])
+#define NODE_ID(v) ((int32_t)A(v)->f[1].i)
+V d_n_html_Node_select(V n, V css) { V r = html_select(NODE_DOC(n), NODE_ID(n), css, 0); d_release(n); d_release(css); return r; }
+V d_n_html_Node_select_first(V n, V css) { V r = html_select(NODE_DOC(n), NODE_ID(n), css, 1); d_release(n); d_release(css); return r; }
+V d_n_html_Node_text(V n) { V r = node_text(NODE_DOC(n), NODE_ID(n)); d_release(n); return r; }
+V d_n_html_Node_tag(V n) {
+  HT t = html_tree(NODE_DOC(n)); const HNode* x = &t.nd[NODE_ID(n)];
+  V r = d_str_new(t.pool + x->name_off, x->name_len);
+  d_release(n);
+  return r;
+}
+V d_n_html_Node_attr(V n, V name) {
+  HT t = html_tree(NODE_DOC(n));
+  const HAttr* a = ht_attr(&t, NODE_ID(n), S(name)->p, S(name)->len);
+  V r = a ? d_some(d_str_new(t.pool + a->val_off, a->val_len)) : d_none();
+  d_release(n); d_release(name);
+  return r;
+}
+V d_n_html_Node_attrs(V n) {
+  HT t = html_tree(NODE_DOC(n)); const HNode* x = &t.nd[NODE_ID(n)];
+  V m = map_new(K_MAP, x->nattr);
+  for (int k = 0; k < x->nattr; k++) {
+    const HAttr* a = &t.at[x->attr0 + k];
+    map_put(M(m), d_str_new(t.pool + a->name_off, a->name_len), d_str_new(t.pool + a->val_off, a->val_len));
+  }
+  d_release(n);
+  return m;
+}
+static V node_src(V n, int inner) {
+  HT t = html_tree(NODE_DOC(n)); const HNode* x = &t.nd[NODE_ID(n)];
+  int64_t lo = inner ? x->in_lo : x->src_lo, hi = inner ? x->in_hi : x->src_hi;
+  if (hi < lo) hi = lo;
+  const char* src = t.pool + t.h->src_off;
+  /* keep UTF-8 boundaries (positions always sit on ASCII markup, but be safe) */
+  V r = d_str_new(src + lo, hi - lo);
+  d_release(n);
+  return r;
+}
+V d_n_html_Node_html(V n) { return node_src(n, 0); }
+V d_n_html_Node_inner_html(V n) { return node_src(n, 1); }
+V d_n_html_Node_children(V n) {
+  HT t = html_tree(NODE_DOC(n));
+  V out = list_new(0);
+  for (int32_t c = t.nd[NODE_ID(n)].first; c >= 0; c = t.nd[c].next) if (t.nd[c].kind == HK_ELEM) lpush(out, node_new(NODE_DOC(n), c));
+  d_release(n);
+  return out;
+}
+V d_n_html_Node_parent(V n) {
+  HT t = html_tree(NODE_DOC(n));
+  int32_t p = parent_elem(&t, NODE_ID(n));
+  V r = p >= 0 ? d_some(node_new(NODE_DOC(n), p)) : d_none();
+  d_release(n);
+  return r;
 }

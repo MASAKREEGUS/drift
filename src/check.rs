@@ -12,6 +12,7 @@ pub const STD_MODULES: &[(&str, &str)] = &[
     ("env", include_str!("std/env.dr")),
     ("bytes", include_str!("std/bytes.dr")),
     ("http", include_str!("std/http.dr")),
+    ("re", include_str!("std/re.dr")),
     ("html", include_str!("std/html.dr")),
     ("json", include_str!("std/json.dr")),
     ("time", include_str!("std/time.dr")),

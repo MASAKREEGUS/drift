@@ -88,8 +88,17 @@ HTTP: HTTP/1.1 on plain sockets (connect 15 s, I/O 30 s timeouts, chunked, up to
 TLS uses the system OpenSSL 3 through `dlopen` on the first https URL, with peer and hostname verification and
 TLS >= 1.2, so `drift build` output still has no link-time dependency. `http.serve` handles one request per
 connection, sequentially until phase 5 (10 s I/O timeout, 64 KiB headers, 16 MiB bodies, UTF-8 checked).
-Known limits: `spawn`/`par_map`/channels run sequentially until phase 5; `html` natives arrive later in
-phase 4 (calling them panics with a clear message); a value leaked on an early `?` exit is reclaimed at process end.
+Regex: own engine (pattern → AST → instructions kept in a Bytes value → Pike VM over UTF-8), leftmost-first
+like Perl/RE2, linear in the text, so no pattern can hang a program (`(a+)+$` on 5000 chars runs in
+microseconds). No backreferences or lookaround: they are rejected with a reason. Case folding is simple
+(ASCII, Latin-1, Latin Extended-A, Greek, Cyrillic). Programs are capped at 20000 instructions.
+HTML: forgiving tokenizer with the implied end tags that matter in practice (p, li, dt/dd, option, tr, td/th,
+thead/tbody/tfoot, h1-h6, a), raw script/style, entities, nesting capped at 512. The tree is stored flat in
+one Bytes value in document order, so a Node is (Document, index), copying is free and descendants are a
+contiguous range. `text()` collapses whitespace and separates block elements, like rendered text.
+Both parsers were fuzzed under ASan/UBSan/LeakSanitizer (800 random and adversarial inputs).
+`r"""..."""` raw multi-line strings exist because HTML, JSON, CSS and regexes are this language's daily data.
+Known limits: `spawn`/`par_map`/channels run sequentially until phase 5; a value leaked on an early `?` exit is reclaimed at process end.
 
 ## 8. Roadmap
 | Phase | Deliverable |

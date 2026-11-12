@@ -114,3 +114,15 @@ fn long_signature_breaks_params_not_return_type() {
     let out = fmt(src);
     assert!(out.starts_with("fn read_record(\n  file: fs.File,\n  offset: Int,\n) -> Result[Option[(Str, Bytes, Int)], StoreError] uses fs {"), "{}", out);
 }
+
+#[test]
+fn raw_triple_strings_round_trip() {
+    let src = "fn page() -> Str {\n  r\"\"\"\n    <p class=\"x\">{a}</p>\n      <b>\\n</b>\n\n    end\n    \"\"\"\n}\n";
+    let out = drift::fmt::format_source(src).ok().expect("formats");
+    assert_eq!(drift::fmt::format_source(&out).ok().unwrap(), out, "not idempotent:\n{}", out);
+    let prog = drift::parser::parse(&out);
+    assert!(prog.diags.is_empty(), "{:?}", prog.diags);
+    let found = format!("{:?}", prog.module.items[0]);
+    assert!(found.contains(r#"<p class=\"x\">{a}</p>\n  <b>\\n</b>\n\nend"#), "{}\n{}", out, found);
+    assert_eq!(drift::fmt::format_source("fn f() -> Str {\n  r\"\"\"say \"hi\" now\"\"\"\n}\n").ok().unwrap(), "fn f() -> Str {\n  r\"\"\"say \"hi\" now\"\"\"\n}\n");
+}
