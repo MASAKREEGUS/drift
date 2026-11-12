@@ -175,10 +175,11 @@ import shop.offers.{discount, Offer}
 | command | purpose |
 |---|---|
 | `drift check [--json]` | all diagnostics at once, each with `code`, `span`, `message`, `expected`, `found`, `fix` (machine-applicable edit) |
+| `drift check --fix` | apply every certain fix (syntax, layout, …) in place, then report what is left |
 | `drift run <file>` | compile and run |
 | `drift test` | run every `examples` and `test` block |
 | `drift build [--release]` | native binary through C (x86-64, ARM64, RISC-V; no runtime dependency) |
-| `drift fmt` | canonical layout |
+| `drift fmt [--check]` | canonical layout (width 100, 2 spaces); comments and single blank lines are kept |
 | `drift outline <module>` | compact signatures, types and effects of a module |
 | `drift explain <code>` | full explanation of a diagnostic |
 | `drift mcp` | MCP server: check, outline, type_at, references, apply_fix, run_tests |

@@ -2,11 +2,7 @@
 import std.fs
 import std.bytes
 
-pub struct Store {
-  path: Str
-  index: Map[Str, Int]
-  file: fs.File
-}
+pub struct Store { path: Str, index: Map[Str, Int], file: fs.File }
 
 pub enum StoreError {
   Io(fs.IoError)
@@ -30,7 +26,10 @@ pub fn open(path: Str) -> Result[Store, StoreError] uses fs {
 }
 
 /// Record layout: u32 key_len | u32 value_len | key | value
-fn read_record(file: fs.File, offset: Int) -> Result[Option[(Str, Bytes, Int)], StoreError] uses fs {
+fn read_record(
+  file: fs.File,
+  offset: Int,
+) -> Result[Option[(Str, Bytes, Int)], StoreError] uses fs {
   let header = file.read_at(offset, 8)?
   if header.is_empty() {
     return Ok(None)
@@ -51,7 +50,9 @@ fn read_record(file: fs.File, offset: Int) -> Result[Option[(Str, Bytes, Int)], 
 pub fn put(var self: Store, key: Str, value: Bytes) -> Result[(), StoreError] uses fs {
   let k = key.to_bytes()
   let offset = self.file.len()?
-  self.file.append(bytes.u32_le(k.len().to_u32()?) + bytes.u32_le(value.len().to_u32()?) + k + value)?
+  self.file.append(
+    bytes.u32_le(k.len().to_u32()?) + bytes.u32_le(value.len().to_u32()?) + k + value,
+  )?
   self.file.sync()?
   self.index[key] = offset
   Ok(())

@@ -1,12 +1,6 @@
 /// Offer validation for a deal aggregator: detect fake discounts.
 
-pub struct Offer {
-  sku: Str
-  store: Str
-  price: Int
-  reference: Int
-  history: List[Int]
-}
+pub struct Offer { sku: Str, store: Str, price: Int, reference: Int, history: List[Int] }
 
 pub enum OfferError {
   AboveReference { price: Int, reference: Int }
@@ -63,7 +57,8 @@ pub fn verdict(self: Offer) -> Verdict {
 }
 
 examples verdict {
-  Offer { sku: "a", store: "s", price: 70, reference: 100, history: [100, 98, 102] }.verdict() == Verdict.Real { discount: 30 }
+  Offer { sku: "a", store: "s", price: 70, reference: 100, history: [100, 98, 102] }.verdict() ==
+    Verdict.Real { discount: 30 }
   Offer { sku: "b", store: "s", price: 70, reference: 200, history: [100, 98, 102] }.verdict() ==
     Verdict.Fake { reason: OfferError.InflatedReference { reference: 200, median: 100 } }
 }

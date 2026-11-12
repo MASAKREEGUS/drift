@@ -18,8 +18,15 @@ pub fn area(self: Shape) -> Float {
 
 pub fn translate(self: Shape, dx: Float, dy: Float) -> Shape {
   match self {
-    Shape.Circle { center, r } => Shape.Circle { center: { center with x: center.x + dx, y: center.y + dy }, r }
-    Shape.Rect { origin, w, h } => Shape.Rect { origin: { origin with x: origin.x + dx, y: origin.y + dy }, w, h }
+    Shape.Circle { center, r } => Shape.Circle {
+      center: { center with x: center.x + dx, y: center.y + dy },
+      r,
+    }
+    Shape.Rect { origin, w, h } => Shape.Rect {
+      origin: { origin with x: origin.x + dx, y: origin.y + dy },
+      w,
+      h,
+    }
     Shape.Empty => Shape.Empty
   }
 }

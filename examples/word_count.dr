@@ -13,8 +13,8 @@ fn count_words(text: Str) -> Map[Str, Int] {
 }
 
 examples count_words {
-  count_words("a b a") == { "a": 2, "b": 1 }
-  count_words("Hola, hola!") == { "hola": 2 }
+  count_words("a b a") == {"a": 2, "b": 1}
+  count_words("Hola, hola!") == {"hola": 2}
   count_words("") == {}
 }
 
