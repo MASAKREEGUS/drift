@@ -1,6 +1,4 @@
 /// Append-only key-value store (Bitcask-style): one log file + in-memory index.
-import std.fs
-import std.bytes
 
 pub struct Store { path: Str, index: Map[Str, Int], file: fs.File }
 
@@ -37,8 +35,8 @@ fn read_record(
   if header.len() < 8 {
     return Err(StoreError.Corrupt { offset })
   }
-  let klen = header.u32_le(0).to_int()
-  let vlen = header.u32_le(4).to_int()
+  let klen = header.read_u32_le(0)
+  let vlen = header.read_u32_le(4)
   let body = file.read_at(offset + 8, klen + vlen)?
   if body.len() < klen + vlen {
     return Err(StoreError.Corrupt { offset })
@@ -50,9 +48,7 @@ fn read_record(
 pub fn put(var self: Store, key: Str, value: Bytes) -> Result[(), StoreError] uses fs {
   let k = key.to_bytes()
   let offset = self.file.len()?
-  self.file.append(
-    bytes.u32_le(k.len().to_u32()?) + bytes.u32_le(value.len().to_u32()?) + k + value,
-  )?
+  self.file.append(bytes.u32_le(k.len()) + bytes.u32_le(value.len()) + k + value)?
   self.file.sync()?
   self.index[key] = offset
   Ok(())

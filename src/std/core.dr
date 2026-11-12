@@ -1,0 +1,186 @@
+/// Drift prelude: every name here is in scope in every module.
+/// Types without fields are built into the runtime. Bodies marked `todo` are native.
+pub struct Int {}
+pub struct I32 {}
+pub struct U8 {}
+pub struct U32 {}
+pub struct U64 {}
+pub struct Float {}
+pub struct F32 {}
+pub struct Bool {}
+pub struct Str {}
+pub struct Bytes {}
+pub struct Never {}
+pub struct List[T] {}
+pub struct Map[K, V] {}
+pub struct Set[T] {}
+pub struct Range {}
+pub struct Task[T] {}
+pub struct Sender[T] {}
+pub struct Receiver[T] {}
+
+pub enum Option[T] {
+  Some(T)
+  None
+}
+
+pub enum Result[T, E] {
+  Ok(T)
+  Err(E)
+}
+
+/// Catch-all error for scripts: `?` converts any error into it.
+pub struct Error { message: Str }
+
+pub fn error(message: Str) -> Error { todo }
+pub fn panic(message: Str) -> Never { todo }
+pub fn channel[T](capacity: Int) -> (Sender[T], Receiver[T])
+  requires capacity >= 0
+{
+  todo
+}
+
+// ---- Int ----
+pub fn to_float(self: Int) -> Float { todo }
+pub fn abs(self: Int) -> Int { todo }
+pub fn min(self: Int, other: Int) -> Int { todo }
+pub fn max(self: Int, other: Int) -> Int { todo }
+pub fn pow(self: Int, exp: Int) -> Int { todo }
+pub fn to_u8(self: Int) -> Option[U8] { todo }
+pub fn to_u32(self: Int) -> Option[U32] { todo }
+pub fn to_u64(self: Int) -> Option[U64] { todo }
+pub fn to_i32(self: Int) -> Option[I32] { todo }
+pub fn to_int(self: U8) -> Int { todo }
+pub fn to_int(self: U32) -> Int { todo }
+pub fn to_int(self: I32) -> Int { todo }
+pub fn to_int(self: U64) -> Option[Int] { todo }
+
+// ---- Float ----
+pub fn to_int(self: Float) -> Int { todo }
+pub fn round(self: Float) -> Float { todo }
+pub fn floor(self: Float) -> Float { todo }
+pub fn ceil(self: Float) -> Float { todo }
+pub fn sqrt(self: Float) -> Float { todo }
+pub fn abs(self: Float) -> Float { todo }
+pub fn min(self: Float, other: Float) -> Float { todo }
+pub fn max(self: Float, other: Float) -> Float { todo }
+pub fn is_nan(self: Float) -> Bool { todo }
+pub fn to_f32(self: Float) -> F32 { todo }
+pub fn to_float(self: F32) -> Float { todo }
+
+// ---- Str ----
+pub fn len(self: Str) -> Int { todo }
+pub fn is_empty(self: Str) -> Bool { todo }
+pub fn chars(self: Str) -> List[Str] { todo }
+pub fn bytes(self: Str) -> Bytes { todo }
+pub fn to_bytes(self: Str) -> Bytes { todo }
+pub fn to_lower(self: Str) -> Str { todo }
+pub fn to_upper(self: Str) -> Str { todo }
+pub fn trim(self: Str) -> Str { todo }
+pub fn trim_matches(self: Str, keep_out: fn(Str) -> Bool) -> Str { todo }
+pub fn split(self: Str, sep: Str) -> List[Str] { todo }
+pub fn split_whitespace(self: Str) -> List[Str] { todo }
+pub fn lines(self: Str) -> List[Str] { todo }
+pub fn contains(self: Str, part: Str) -> Bool { todo }
+pub fn starts_with(self: Str, prefix: Str) -> Bool { todo }
+pub fn ends_with(self: Str, suffix: Str) -> Bool { todo }
+pub fn find(self: Str, part: Str) -> Option[Int] { todo }
+pub fn replace(self: Str, from: Str, to: Str) -> Str { todo }
+pub fn slice(self: Str, start: Int, end: Int) -> Str { todo }
+pub fn repeat(self: Str, n: Int) -> Str { todo }
+pub fn parse_int(self: Str) -> Option[Int] { todo }
+pub fn parse_float(self: Str) -> Option[Float] { todo }
+pub fn is_alphanumeric(self: Str) -> Bool { todo }
+pub fn is_alphabetic(self: Str) -> Bool { todo }
+pub fn is_numeric(self: Str) -> Bool { todo }
+pub fn is_whitespace(self: Str) -> Bool { todo }
+
+// ---- Bytes ----
+pub fn len(self: Bytes) -> Int { todo }
+pub fn is_empty(self: Bytes) -> Bool { todo }
+pub fn slice(self: Bytes, start: Int, end: Int) -> Bytes { todo }
+pub fn to_str(self: Bytes) -> Option[Str] { todo }
+pub fn read_u32_le(self: Bytes, at: Int) -> Int { todo }
+pub fn read_u64_le(self: Bytes, at: Int) -> Int { todo }
+
+// ---- List ----
+pub fn len[T](self: List[T]) -> Int { todo }
+pub fn is_empty[T](self: List[T]) -> Bool { todo }
+pub fn get[T](self: List[T], index: Int) -> Option[T] { todo }
+pub fn first[T](self: List[T]) -> Option[T] { todo }
+pub fn last[T](self: List[T]) -> Option[T] { todo }
+pub fn push[T](var self: List[T], item: T) -> () { todo }
+pub fn pop[T](var self: List[T]) -> Option[T] { todo }
+pub fn insert[T](var self: List[T], index: Int, item: T) -> () { todo }
+pub fn remove[T](var self: List[T], index: Int) -> T { todo }
+pub fn contains[T](self: List[T], item: T) -> Bool { todo }
+pub fn index_of[T](self: List[T], item: T) -> Option[Int] { todo }
+pub fn slice[T](self: List[T], start: Int, end: Int) -> List[T] { todo }
+pub fn take[T](self: List[T], n: Int) -> List[T] { todo }
+pub fn skip[T](self: List[T], n: Int) -> List[T] { todo }
+pub fn reversed[T](self: List[T]) -> List[T] { todo }
+pub fn sorted[T](self: List[T]) -> List[T] { todo }
+pub fn sorted_by[T, K](self: List[T], key: fn(T) -> K) -> List[T] { todo }
+pub fn map[T, U](self: List[T], f: fn(T) -> U) -> List[U] { todo }
+pub fn filter[T](self: List[T], keep: fn(T) -> Bool) -> List[T] { todo }
+pub fn flat_map[T, U](self: List[T], f: fn(T) -> List[U]) -> List[U] { todo }
+pub fn fold[T, A](self: List[T], init: A, f: fn(A, T) -> A) -> A { todo }
+pub fn find[T](self: List[T], pred: fn(T) -> Bool) -> Option[T] { todo }
+pub fn any[T](self: List[T], pred: fn(T) -> Bool) -> Bool { todo }
+pub fn all[T](self: List[T], pred: fn(T) -> Bool) -> Bool { todo }
+pub fn count[T](self: List[T], pred: fn(T) -> Bool) -> Int { todo }
+pub fn sum[T](self: List[T]) -> T { todo }
+pub fn min[T](self: List[T]) -> Option[T] { todo }
+pub fn max[T](self: List[T]) -> Option[T] { todo }
+pub fn min_by[T, K](self: List[T], key: fn(T) -> K) -> Option[T] { todo }
+pub fn max_by[T, K](self: List[T], key: fn(T) -> K) -> Option[T] { todo }
+pub fn enumerate[T](self: List[T]) -> List[(Int, T)] { todo }
+pub fn zip[T, U](self: List[T], other: List[U]) -> List[(T, U)] { todo }
+pub fn chunks[T](self: List[T], size: Int) -> List[List[T]] { todo }
+pub fn dedup[T](self: List[T]) -> List[T] { todo }
+pub fn group_by[T, K](self: List[T], key: fn(T) -> K) -> Map[K, List[T]] { todo }
+pub fn to_set[T](self: List[T]) -> Set[T] { todo }
+pub fn join(self: List[Str], sep: Str) -> Str { todo }
+pub fn par_map[T, U](self: List[T], f: fn(T) -> U) -> List[U] uses spawn { todo }
+
+// ---- Map ----
+pub fn len[K, V](self: Map[K, V]) -> Int { todo }
+pub fn is_empty[K, V](self: Map[K, V]) -> Bool { todo }
+pub fn get[K, V](self: Map[K, V], key: K) -> Option[V] { todo }
+pub fn contains_key[K, V](self: Map[K, V], key: K) -> Bool { todo }
+pub fn remove[K, V](var self: Map[K, V], key: K) -> Option[V] { todo }
+pub fn keys[K, V](self: Map[K, V]) -> List[K] { todo }
+pub fn values[K, V](self: Map[K, V]) -> List[V] { todo }
+pub fn entries[K, V](self: Map[K, V]) -> List[(K, V)] { todo }
+
+// ---- Set ----
+pub fn Set.of[T](items: List[T]) -> Set[T] { todo }
+pub fn len[T](self: Set[T]) -> Int { todo }
+pub fn contains[T](self: Set[T], item: T) -> Bool { todo }
+pub fn add[T](var self: Set[T], item: T) -> () { todo }
+pub fn remove[T](var self: Set[T], item: T) -> Bool { todo }
+pub fn to_list[T](self: Set[T]) -> List[T] { todo }
+pub fn union[T](self: Set[T], other: Set[T]) -> Set[T] { todo }
+pub fn intersection[T](self: Set[T], other: Set[T]) -> Set[T] { todo }
+
+// ---- Option ----
+pub fn is_some[T](self: Option[T]) -> Bool { todo }
+pub fn is_none[T](self: Option[T]) -> Bool { todo }
+pub fn unwrap_or[T](self: Option[T], default: T) -> T { todo }
+pub fn map[T, U](self: Option[T], f: fn(T) -> U) -> Option[U] { todo }
+pub fn and_then[T, U](self: Option[T], f: fn(T) -> Option[U]) -> Option[U] { todo }
+pub fn ok_or[T, E](self: Option[T], err: E) -> Result[T, E] { todo }
+
+// ---- Result ----
+pub fn is_ok[T, E](self: Result[T, E]) -> Bool { todo }
+pub fn is_err[T, E](self: Result[T, E]) -> Bool { todo }
+pub fn ok[T, E](self: Result[T, E]) -> Option[T] { todo }
+pub fn unwrap_or[T, E](self: Result[T, E], default: T) -> T { todo }
+pub fn map[T, E, U](self: Result[T, E], f: fn(T) -> U) -> Result[U, E] { todo }
+pub fn map_err[T, E, F](self: Result[T, E], f: fn(E) -> F) -> Result[T, F] { todo }
+pub fn and_then[T, E, U](self: Result[T, E], f: fn(T) -> Result[U, E]) -> Result[U, E] { todo }
+
+// ---- tasks and channels ----
+pub fn join[T](self: Task[T]) -> T uses spawn { todo }
+pub fn send[T](self: Sender[T], item: T) -> () uses spawn { todo }
+pub fn recv[T](self: Receiver[T]) -> Option[T] uses spawn { todo }

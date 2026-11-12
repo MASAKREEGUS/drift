@@ -279,7 +279,12 @@ impl<'a> Parser<'a> {
 
     fn fn_decl(&mut self) -> PResult<FnDecl> {
         self.bump(); // fn
-        let name = self.ident()?;
+        let mut name = self.ident()?;
+        let mut owner = None;
+        if self.eat_p(P::Dot) {
+            owner = Some(name);
+            name = self.ident()?;
+        }
         let generics = self.generics()?;
         self.expect_p(P::LParen)?;
         let mut params = Vec::new();
@@ -345,7 +350,7 @@ impl<'a> Parser<'a> {
             return Err(());
         }
         let body = self.block()?;
-        Ok(FnDecl { name, generics, params, ret, uses, requires, ensures, body })
+        Ok(FnDecl { owner, name, generics, params, ret, uses, requires, ensures, body })
     }
 
     fn uses(&mut self) -> PResult<Vec<Ident>> {

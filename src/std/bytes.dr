@@ -1,0 +1,12 @@
+/// Byte encoding helpers.
+pub fn u32_le(value: Int) -> Bytes
+  requires value >= 0 and value < 4294967296
+{
+  todo
+}
+
+pub fn u64_le(value: Int) -> Bytes
+  requires value >= 0
+{
+  todo
+}

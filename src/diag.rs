@@ -51,6 +51,8 @@ pub struct Diag {
     pub expected: Option<String>,
     pub found: Option<String>,
     pub fix: Vec<Edit>,
+    /// For holes: names in scope and their types.
+    pub scope: Vec<(String, String)>,
 }
 
 impl Diag {
@@ -63,7 +65,13 @@ impl Diag {
             expected: None,
             found: None,
             fix: Vec::new(),
+            scope: Vec::new(),
         }
+    }
+    pub fn warning(code: &'static str, span: Span, message: impl Into<String>) -> Diag {
+        let mut d = Diag::error(code, span, message);
+        d.severity = Severity::Warning;
+        d
     }
     pub fn expected(mut self, e: impl Into<String>) -> Diag {
         self.expected = Some(e.into());
@@ -160,6 +168,10 @@ pub fn render_json(d: &Diag, file: &str, idx: &LineIndex) -> String {
     if let Some(f) = &d.found {
         s.push_str(&format!(",\"found\":{}", json_str(f)));
     }
+    if !d.scope.is_empty() {
+        let items: Vec<String> = d.scope.iter().map(|(k, v)| format!("{}:{}", json_str(k), json_str(v))).collect();
+        s.push_str(&format!(",\"scope\":{{{}}}", items.join(",")));
+    }
     if !d.fix.is_empty() {
         let edits: Vec<String> = d
             .fix
@@ -185,6 +197,10 @@ pub fn render_human(d: &Diag, file: &str, idx: &LineIndex) -> String {
     }
     if let Some(f) = &d.found {
         s.push_str(&format!("       = found: {}\n", f));
+    }
+    if !d.scope.is_empty() {
+        let items: Vec<String> = d.scope.iter().map(|(k, v)| format!("{}: {}", k, v)).collect();
+        s.push_str(&format!("       = in scope: {}\n", items.join(", ")));
     }
     for e in &d.fix {
         s.push_str(&format!("       = fix: replace {}..{} with {}\n", e.span.lo, e.span.hi, json_str(&e.text)));

@@ -55,6 +55,8 @@ pub enum VariantFields {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FnDecl {
+    /// `fn Type.name(...)`: associated function of `Type`.
+    pub owner: Option<Ident>,
     pub name: Ident,
     pub generics: Vec<Ident>,
     pub params: Vec<Param>,

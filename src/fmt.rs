@@ -237,6 +237,34 @@ pub fn check_formatted(src: &str) -> Option<Diag> {
     Some(d)
 }
 
+/// Public interface of a module: signatures, types and docs, without bodies, examples or tests.
+pub fn outline(src: &str) -> Result<String, FmtError> {
+    let out = parse(src);
+    if out.diags.iter().any(|d| d.is_error()) {
+        return Err(FmtError::Syntax(out.diags));
+    }
+    let mut p = Printer { src, comments: Vec::new(), ci: 0 };
+    let mut parts = Vec::new();
+    for it in &out.module.items {
+        if matches!(it.kind, ItemKind::Import { .. } | ItemKind::Examples { .. } | ItemKind::Test { .. }) {
+            continue;
+        }
+        let mut s = String::new();
+        for d in &it.doc {
+            s.push_str(&format!("/// {}\n", d));
+        }
+        let mut item = it.clone();
+        if let ItemKind::Fn(f) = &mut item.kind {
+            f.body.stmts.clear();
+            f.body.span = Span::empty_at(f.body.span.lo);
+        }
+        let text = render(&p.item(&item), WIDTH);
+        s.push_str(text.trim_end().trim_end_matches("{}").trim_end());
+        parts.push(s);
+    }
+    Ok(parts.join("\n") + "\n")
+}
+
 struct Printer<'a> {
     src: &'a str,
     comments: Vec<Comment>,
@@ -501,7 +529,13 @@ impl<'a> Printer<'a> {
             .map(|p| cat(vec![t(format!("{}{}: ", if p.mutable { "var " } else { "" }, p.name.name)), self.ty(&p.ty)]))
             .collect();
         let sig = cat(vec![
-            t(format!("{}fn {}{}", vis, f.name.name, self.generics(&f.generics))),
+            t(format!(
+                "{}fn {}{}{}",
+                vis,
+                f.owner.as_ref().map(|o| format!("{}.", o.name)).unwrap_or_default(),
+                f.name.name,
+                self.generics(&f.generics)
+            )),
             list("(", params, ")", false),
             t(" -> "),
             // The return type never breaks: long signatures break their parameter list instead.

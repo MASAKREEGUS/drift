@@ -1,0 +1,25 @@
+/// Files and directories.
+pub struct IoError { message: Str, path: Str }
+
+pub struct File {}
+
+pub enum Mode {
+  Read
+  Write
+  Append
+  ReadAppendCreate
+}
+
+pub fn read_str(path: Str) -> Result[Str, IoError] uses fs { todo }
+pub fn read_bytes(path: Str) -> Result[Bytes, IoError] uses fs { todo }
+pub fn write_str(path: Str, text: Str) -> Result[(), IoError] uses fs { todo }
+pub fn write_bytes(path: Str, data: Bytes) -> Result[(), IoError] uses fs { todo }
+pub fn exists(path: Str) -> Bool uses fs { todo }
+pub fn list_dir(path: Str) -> Result[List[Str], IoError] uses fs { todo }
+pub fn remove(path: Str) -> Result[(), IoError] uses fs { todo }
+pub fn temp_path(prefix: Str) -> Result[Str, IoError] uses fs { todo }
+pub fn open(path: Str, mode: Mode) -> Result[File, IoError] uses fs { todo }
+pub fn read_at(self: File, offset: Int, n: Int) -> Result[Bytes, IoError] uses fs { todo }
+pub fn append(self: File, data: Bytes) -> Result[(), IoError] uses fs { todo }
+pub fn len(self: File) -> Result[Int, IoError] uses fs { todo }
+pub fn sync(self: File) -> Result[(), IoError] uses fs { todo }

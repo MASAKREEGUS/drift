@@ -1,0 +1,16 @@
+/// HTTP client and server.
+pub struct HttpError { message: Str, status: Int }
+
+pub struct Request { method: Str, path: Str, query: Map[Str, Str], headers: Map[Str, Str], body: Str }
+
+pub struct Response {}
+
+pub fn get(url: Str) -> Result[Response, HttpError] uses net { todo }
+pub fn post(url: Str, body: Str) -> Result[Response, HttpError] uses net { todo }
+pub fn text(self: Response) -> Result[Str, HttpError] { todo }
+pub fn status(self: Response) -> Int { todo }
+pub fn header(self: Response, name: Str) -> Option[Str] { todo }
+pub fn Response.json(body: Str) -> Response { todo }
+pub fn Response.text(body: Str) -> Response { todo }
+pub fn Response.status(code: Int) -> Response { todo }
+pub fn serve(addr: Str, handler: fn(Request) -> Response) -> Result[(), HttpError] uses net, spawn { todo }

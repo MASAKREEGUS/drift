@@ -1,0 +1,8 @@
+/// Random numbers.
+pub fn int(low: Int, high: Int) -> Int uses rand
+  requires low < high
+{
+  todo
+}
+
+pub fn float() -> Float uses rand { todo }

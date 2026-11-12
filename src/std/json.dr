@@ -1,0 +1,5 @@
+/// JSON encoding of any Drift value (structs become objects, enums tagged objects).
+pub struct JsonError { message: Str }
+
+pub fn encode[T](value: T) -> Str { todo }
+pub fn decode[T](text: Str) -> Result[T, JsonError] { todo }

@@ -1,6 +1,3 @@
-import std.fs
-import std.env
-
 fn count_words(text: Str) -> Map[Str, Int] {
   var counts: Map[Str, Int] = {}
   for word in text.to_lower().split_whitespace() {

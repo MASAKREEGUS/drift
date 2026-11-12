@@ -1,0 +1,6 @@
+/// Standard input and output.
+pub fn println(text: Str) -> () uses io { todo }
+pub fn print(text: Str) -> () uses io { todo }
+pub fn eprintln(text: Str) -> () uses io { todo }
+pub fn read_line() -> Option[Str] uses io { todo }
+pub fn read_all() -> Str uses io { todo }

@@ -1,0 +1,11 @@
+/// HTML parsing and CSS selection.
+pub struct Document {}
+
+pub struct Node {}
+
+pub fn parse(source: Str) -> Document { todo }
+pub fn select(self: Document, css: Str) -> List[Node] { todo }
+pub fn select_first(self: Document, css: Str) -> Option[Node] { todo }
+pub fn text(self: Node) -> Str { todo }
+pub fn attr(self: Node, name: Str) -> Option[Str] { todo }
+pub fn html(self: Node) -> Str { todo }

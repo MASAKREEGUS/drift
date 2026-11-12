@@ -1,8 +1,5 @@
-import std.http
-import std.html
-
 pub enum FetchError {
-  Http(HttpError)
+  Http(http.HttpError)
   NoTitle { url: Str }
 }
 

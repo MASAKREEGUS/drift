@@ -24,7 +24,7 @@ Naming is enforced: `snake_case` for values, functions, fields, modules; `Pascal
 
 ## Types
 ```
-Int (i64)  I32  U8  U32  U64  Float (f64)  F32  Bool  Str (UTF-8)  Bytes  ()  (unit)
+Int (i64)  I32  U8  U32  U64  Float (f64)  F32  Bool  Str (UTF-8)  Bytes  ()  (unit)  Never (`panic`, `return`)
 List[T]  Map[K, V] (insertion-ordered)  Set[T]  Option[T]  Result[T, E]
 (A, B)  tuple          fn(A, B) -> R  function type (effects: fn(A) -> R uses net)
 ```
@@ -51,12 +51,13 @@ pub const MAX_RETRIES: Int = 3                   // the only global binding allo
 
 pub type Prices = Map[Str, Int]                   // alias
 
-pub fn area(self: Shape) -> Float { ... }         // first param `self` ⇒ method: shape.area()
+pub fn area(self: Shape) -> Float { ... }         // first param `self` ⇒ method, called only as shape.area()
 pub fn grow(var self: Point, by: Float) -> () { self.x += by }   // `var self` mutates the caller's var
 fn add(a: Int, b: Int) -> Int { a + b }           // the last expression is the result
 fn first[T](xs: List[T]) -> Option[T] { xs.get(0) }
+pub fn Point.origin() -> Point { Point { x: 0.0, y: 0.0 } }   // associated fn: Point.origin()
 ```
-- Methods must live in the module that defines the type. `x.f(a)` means `f(x, a)`; the formatter always writes method form.
+- Methods must live in the module that defines the type and are called only as `x.f(a)`. Associated functions `fn T.f(...)` (no `self`) are called as `T.f(...)`.
 - Construction: `Point { x: 1.0, y: 2.0 }`, shorthand `Point { x, y }`, `Shape.Circle { r: 2.0 }`, `Shape.Empty`.
 - Functional update: `{ p with x: 5.0 }`.
 - Generic constraints are inferred from use of `==`, `<`, `hash`, `show`; no user traits in v0.
@@ -85,14 +86,16 @@ match shape {
   Shape.Empty => 0.0
 }
 ```
-- `match` must be exhaustive. Patterns: literals, names, `_`, `Variant { f, f: pat, .. }`, `(a, b)`, `[x, ..rest]`, `[]`, `Some(x)`, `None`, `Ok(x)`, `Err(e)`, `a | b`.
-- Closures: `|x| x * 2`, `|(k, v)| k`, `|a, b| { let s = a + b; s * s }`, annotated `|x: Int| -> Result[Int, E] { ... }`. Params are patterns. Closures capture by value. Inside a closure, `?` and `return` exit the closure, not the enclosing function.
+- `match` must be exhaustive (missing cases are reported as patterns) and unreachable arms warn. Or-patterns cannot bind names. Patterns: literals, names, `_`, `Variant { f, f: pat, .. }`, `(a, b)`, `[x, ..rest]`, `[]`, `Some(x)`, `None`, `Ok(x)`, `Err(e)`, `a | b`.
+- Closures: `|x| x * 2`, `|(k, v)| k`, `|a, b| { let s = a + b; s * s }`, annotated `|x: Int| -> Result[Int, E] { ... }`. Params are patterns. Closures capture by value and cannot assign captured variables. Inside a closure, `?` and `return` exit the closure, not the enclosing function.
 - `{` in expression position starts a Map literal or a `{ v with ... }` update. A block `{ ... }` appears only after `fn`, `if`, `else`, `for`, `while`, `loop`, `=>`, `|...|`, `examples`, `test`. To return a Map from a closure or arm, wrap it: `=> ({"k": 1})`.
 - Struct literals cannot appear bare in the head of `if`/`while`/`for`/`match`: write `if p == (Point { x: 0.0, y: 0.0 }) { ... }`.
 - Blocks separate statements with newlines; `;` is allowed only to join statements on one line.
 - Chains instead of loops when it reads clearly: `xs.filter(|x| x > 0).map(|x| x * 2).sum()`.
-- `?` on `Result` returns `Err` early; on `Option` returns `None` early.
-- `todo` is a typed hole: it type-checks as anything, `drift check` reports its expected type and the names in scope, and `drift build` rejects it.
+- `?` on `Result` returns `Err` early; on `Option` returns `None` early (only inside a function returning `Option`; otherwise `.ok_or(err)?`).
+- A `Result` used as a statement must be handled: ignoring one is an error.
+- No `unwrap`: use `?` or `.unwrap_or(default)`. There is no char type: `.chars()` yields one-character `Str`s.
+- `todo` is a typed hole: it type-checks as anything, `drift check` reports it (severity `hole`, not an error) with its expected type and the names in scope, and `drift build` rejects it.
 
 ## Statements
 ```
@@ -163,10 +166,10 @@ let next = rx.recv()                           // Option[Int]; None once all sen
 
 ## Modules and packages
 ```
-import std.http
 import shop.offers.{discount, Offer}
+import shop.offers                 // then: offers.discount(...)
 ```
-`pub` exports; everything else is module-private. No import cycles. A project is a directory with `drift.toml`; sources in `src/`, entry `src/main.dr`.
+Every std module is always in scope (`io.println`, `fs.read_str`, `http.get`, `json.encode`); never import it. `pub` exports; everything else is module-private. No import cycles. A project is a directory with `drift.toml`; sources in `src/`, entry `src/main.dr`.
 
 ## Standard library (signatures: `drift outline std.<module>`)
 `io fs net http json str list map set math time rand env proc db (sqlite, postgres) re (regex) html (parse, select) bytes hash (sha256, fnv) log`
