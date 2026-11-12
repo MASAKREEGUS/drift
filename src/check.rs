@@ -16,6 +16,7 @@ pub const STD_MODULES: &[(&str, &str)] = &[
     ("html", include_str!("std/html.dr")),
     ("json", include_str!("std/json.dr")),
     ("db", include_str!("std/db.dr")),
+    ("hash", include_str!("std/hash.dr")),
     ("time", include_str!("std/time.dr")),
     ("rand", include_str!("std/rand.dr")),
 ];

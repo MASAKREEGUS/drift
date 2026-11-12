@@ -1,0 +1,351 @@
+/// Port of El Dato's `offers/identity.py`: the identity of a product by its name, to find it in OTHER
+/// stores. Without EAN or model code the same product is recognized by the EXACT set of words that
+/// describe it plus its sizes (100 ml, 1.5 L, 256 GB), never by similarity, and only with an anchor
+/// that makes the name unique: the brand written in the title, a code with letters and digits, or
+/// (perfumes) concentration + size. Must give the same keys as the Python original.
+
+const MIN_TOKENS: Int = 3
+
+const CONCENTRATIONS: Set[Str] = Set.of(["edp", "edt", "edc", "extrait", "parfum"])
+
+const STOPWORDS: Set[Str] = Set.of(
+  [
+    "de",
+    "del",
+    "la",
+    "el",
+    "los",
+    "las",
+    "para",
+    "con",
+    "y",
+    "by",
+    "en",
+    "a",
+    "the",
+    "of",
+    "for",
+    "original",
+    "nuevo",
+    "nueva",
+    "sellado",
+    "oferta",
+  ],
+)
+
+/// Only in perfumes: gender and the word "perfume" do not change the product.
+const PERFUME_GENERIC: Set[Str] = Set.of(
+  [
+    "perfume",
+    "perfumes",
+    "fragancia",
+    "colonia",
+    "hombre",
+    "mujer",
+    "unisex",
+    "men",
+    "women",
+    "man",
+    "woman",
+  ],
+)
+
+const FAKE_BRANDS: Set[Str] = Set.of(
+  ["generico", "generica", "sin marca", "otro", "otros", "varios", "marca"],
+)
+
+const ACCESSORY_WORDS: Set[Str] = Set.of(
+  [
+    "funda",
+    "fundas",
+    "carcasa",
+    "case",
+    "cover",
+    "protector",
+    "mica",
+    "lamina",
+    "vidrio",
+    "templado",
+    "estuche",
+    "skin",
+    "cable",
+    "cargador",
+    "adaptador",
+    "soporte",
+    "repuesto",
+    "correa",
+    "malla",
+    "bolso",
+    "mochila",
+    "kit",
+    "compatible",
+    "para",
+    "tapa",
+    "cubierta",
+    "lapiz",
+    "stylus",
+    "dock",
+    "base",
+  ],
+)
+
+const UNITS: Map[Str, Str] = {
+  "ml": "ml",
+  "l": "l",
+  "lt": "l",
+  "lts": "l",
+  "litro": "l",
+  "litros": "l",
+  "gb": "gb",
+  "tb": "tb",
+  "kg": "kg",
+  "g": "g",
+  "gr": "g",
+  "grs": "g",
+  "cm": "cm",
+  "mm": "mm",
+  "w": "w",
+  "mah": "mah",
+  "pulgadas": "in",
+  "pulg": "in",
+}
+
+const ATTR_RE: re.Regex = regex(
+  r"\b(\d+(?:[.,]\d+)?)\s?(ml|litros?|lts?|l|gb|tb|kg|grs?|g|cm|mm|w|mah|pulgadas|pulg)\b",
+)
+
+const WORD_RE: re.Regex = regex("[a-z0-9]+")
+
+const BRACKETS_RE: re.Regex = regex(r"\([^()]*\)|\[[^\[\]]*\]")
+
+const PHRASES: List[(re.Regex, Str)] = [
+  (regex(r"extrait\s+de\s+parfum"), " extrait "),
+  (regex(r"eau\s+de\s+parfum|\bedp\b"), " edp "),
+  (regex(r"eau\s+de\s+toilette|\bedt\b"), " edt "),
+  (regex(r"eau\s+de\s+cologne|\bedc\b"), " edc "),
+]
+
+/// The words and sizes that identify a product.
+pub struct Identity { words: Set[Str], attrs: List[Str] }
+
+fn regex(pattern: Str) -> re.Regex {
+  match re.compile(pattern) {
+    Ok(r) => r
+    Err(e) => panic("bad pattern {pattern}: {e.message}")
+  }
+}
+
+/// Lower case without accents: "Ñandú" -> "nandu".
+pub fn fold(text: Option[Str]) -> Str {
+  text.unwrap_or("").to_lower().nfkd().strip_marks()
+}
+
+examples fold {
+  fold(Some("Ñandú PINGÜINO")) == "nandu pinguino"
+  fold(None) == ""
+}
+
+fn is_code(word: Str) -> Bool {
+  word.len() >= 4 and
+    word.chars().any(|c| c.is_numeric()) and
+    word.chars().any(|c| c.is_alphabetic())
+}
+
+fn words_of(text: Str) -> Set[Str] {
+  WORD_RE.find_all(text).map(|m| m.text).to_set()
+}
+
+fn phrases(text: Str) -> Str {
+  PHRASES.fold(text, |t, p| replace_with(t, p))
+}
+
+fn replace_with(text: Str, p: (re.Regex, Str)) -> Str {
+  let (pattern, replacement) = p
+  pattern.replace_all(text, replacement)
+}
+
+/// Sizes written in a folded text, normalized: "1,5 L" -> "1.5l".
+fn attrs_of(text: Str) -> Set[Str] {
+  ATTR_RE.find_all(text).map(|m| attr(m)).to_set()
+}
+
+fn attr(m: re.Match) -> Str {
+  let n = m.groups.get(0).unwrap_or(None).unwrap_or("")
+  let u = m.groups.get(1).unwrap_or(None).unwrap_or("")
+  "{n.replace(",", ".")}{UNITS.get(u).unwrap_or(u)}"
+}
+
+/// (words, sizes) that identify the product, or None if the name is not unique.
+pub fn identity_parts(title: Str, brand: Option[Str], store: Str) -> Option[Identity] {
+  let text = phrases(fold(Some(title)))
+  let attrs = attrs_of(text).to_list().sorted()
+  var words = words_of(ATTR_RE.replace_all(text, " ")).difference(STOPWORDS)
+  let perfume = not words.intersection(CONCENTRATIONS).is_empty()
+  if perfume {
+    words = words.difference(PERFUME_GENERIC)
+  }
+  let folded_brand = fold(brand).trim()
+  let brand_words = if FAKE_BRANDS.contains(folded_brand) {
+    []
+  } else {
+    WORD_RE
+      .find_all(folded_brand)
+      .map(|m| m.text)
+      .filter(|w| w.len() > 2 and not STOPWORDS.contains(w))
+  }
+  let named = not brand_words.is_empty() and brand_words.all(|w| words.contains(w))
+  // a brand that is not the store's name is added even if the title omits it
+  let folded_store = fold(Some(store))
+  let reliable = not brand_words.is_empty() and not brand_words.any(|w| folded_store.contains(w))
+  if reliable and not named {
+    words = words.union(brand_words.to_set())
+  }
+  let anchored = named or
+    reliable or
+    perfume and not attrs.is_empty() or
+    words.to_list().any(|w| is_code(w))
+  if not anchored or words.len() < MIN_TOKENS {
+    return None
+  }
+  Some(Identity { words: words, attrs: attrs })
+}
+
+/// Short stable key (40 hex characters) of the identity, or None.
+pub fn identity_key(title: Str, brand: Option[Str], store: Str) -> Option[Str] {
+  match identity_parts(title, brand, store) {
+    None => None
+    Some(id) => {
+      let raw = "{id.words.to_list().sorted().join(" ")}|{id.attrs.join(",")}"
+      Some(hash.sha1(raw.to_bytes()))
+    }
+  }
+}
+
+fn words_attrs(title: Str) -> (Set[Str], Set[Str]) {
+  let text = phrases(fold(Some(title)))
+  let attrs = attrs_of(text)
+  let words = words_of(ATTR_RE.replace_all(text, " ")).difference(STOPWORDS)
+  if words.intersection(CONCENTRATIONS).is_empty() {
+    (words, attrs)
+  } else {
+    (words.difference(PERFUME_GENERIC), attrs)
+  }
+}
+
+fn without_brackets(text: Str) -> Str {
+  let stripped = BRACKETS_RE.replace_all(text, " ")
+  if stripped == text {
+    text
+  } else {
+    without_brackets(stripped)
+  }
+}
+
+/// True if `candidate` (a comparator's name or another store's title) describes the SAME product as
+/// the offer: every candidate word outside parentheses is in the offer, the offer's sizes are in the
+/// candidate, and for perfumes the same concentration and both tester or neither.
+pub fn contains_product(candidate: Str, offer_title: Str, offer_brand: Option[Str]) -> Bool {
+  let (core_words, _) = words_attrs(without_brackets(candidate))
+  let (full_words, full_attrs) = words_attrs(candidate)
+  let (title_words, offer_attrs) = words_attrs(offer_title)
+  let offer_words = title_words.union(
+    words_of(fold(offer_brand)).to_list().filter(|w| w.len() > 2).to_set(),
+  )
+  if core_words.len() < 2 or not core_words.to_list().any(|w| w.len() >= 4 and not w.is_numeric()) {
+    return false
+  }
+  if not core_words.is_subset(offer_words) {
+    return false
+  }
+  // an accessory word the candidate lacks: it is an accessory of the product
+  if not offer_words.difference(full_words).intersection(ACCESSORY_WORDS).is_empty() {
+    return false
+  }
+  if not offer_attrs.is_subset(full_attrs) or not full_attrs.is_empty() and offer_attrs.is_empty() {
+    return false
+  }
+  if full_words.intersection(CONCENTRATIONS) != offer_words.intersection(CONCENTRATIONS) {
+    return false
+  }
+  full_words.contains("tester") == offer_words.contains("tester")
+}
+
+// the cases of El Dato's tests/test_identity.py
+
+test "same perfume in two stores has the same identity" {
+  let a = identity_key(
+    "Givenchy Amarige EDT 100 ml Mujer",
+    Some("Milan-Perfumes"),
+    "Milan Perfumes",
+  )
+  let b = identity_key(
+    "Perfume Givenchy Amarige Eau de Toilette 100ml",
+    Some("Givenchy"),
+    "Mundo Aromas",
+  )
+  assert a.is_some() and a == b, "{a} {b}"
+}
+
+test "concentration and size separate perfumes" {
+  let edt = identity_key("Givenchy Amarige EDT 100 ml", Some("Givenchy"), "")
+  assert edt != identity_key("Givenchy Amarige EDP 100 ml", Some("Givenchy"), ""), "edp"
+  assert edt != identity_key("Givenchy Amarige EDT 50 ml", Some("Givenchy"), ""), "50 ml"
+  assert edt != identity_key("Givenchy Amarige EDT 100 ml Tester", Some("Givenchy"), ""), "tester"
+}
+
+test "brand from the field completes a title without it" {
+  let reseller = identity_key("Black XS EDT 100 ml Hombre", Some("Paco Rabanne"), "Perfumeria X")
+  let official = identity_key("Paco Rabanne Black XS EDT 100ml", Some("Paco Rabanne"), "Falabella")
+  assert reseller == official, "{reseller} {official}"
+}
+
+test "gender matters outside perfumes" {
+  let women = identity_key("Polera Cooldry Quebec Manga Larga Rojo Mujer XL", Some("Quebec"), "")
+  let men = identity_key("Polera Cooldry Quebec Manga Larga Rojo Hombre XL", Some("Quebec"), "")
+  assert women != men, "gender"
+}
+
+test "generic names without anchor have no identity" {
+  assert identity_key(
+    "Polera Basica Negra M",
+    Some("Tienda Uno"),
+    "Tienda Uno",
+  ).is_none(), "store brand"
+  assert identity_key("Polera Basica Negra M", Some("Generico"), "Tienda Dos").is_none(), "generic"
+  assert identity_key("Mesa Lateral", Some("Dimarsa"), "Dimarsa").is_none(), "two words"
+}
+
+test "model code is an anchor" {
+  // as in the original test: equal with no brand or an empty one (here both None: no anchor)
+  let a = identity_key("Oster BLSTPEGNRT-052", None, "")
+  assert a == identity_key("Oster BLSTPEGNRT-052", Some(""), ""), "{a}"
+  assert identity_key(
+    "Oster Licuadora BLSTPEGNRT052",
+    None,
+    "",
+  ).is_some(), "code with letters and digits"
+}
+
+test "size units are normalized" {
+  let a = identity_key("Bebida Coca-Cola Original 1,5 L", Some("Coca-Cola"), "")
+  assert a == identity_key("Bebida Coca Cola Original 1.5 lts", Some("Coca Cola"), ""), "{a}"
+}
+
+test "contains product" {
+  assert contains_product(
+    "Kingston DataTraveler Exodia 64GB",
+    "Pendrive Kingston DataTraveler Exodia 64GB",
+    None,
+  ), "same"
+  assert not contains_product(
+    "Kingston DataTraveler Exodia Onyx",
+    "Pendrive Kingston DataTraveler Exodia 64GB",
+    None,
+  ), "onyx"
+  assert not contains_product(
+    "Givenchy Amarige EDP 100 ml",
+    "Givenchy Amarige EDT 100 ml",
+    None,
+  ), "edp"
+  assert not contains_product("iPhone 15 128GB", "Funda iPhone 15 128GB", None), "accessory"
+}

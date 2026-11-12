@@ -1,0 +1,46 @@
+import eldato.identity.{contains_product, identity_key}
+
+/// Recomputes El Dato's product identities from its database, to compare with the Python original.
+///   ELDATO_DB=postgres://... drift run ports/eldato keys    -> "id<TAB>key" per product
+///   ELDATO_DB=postgres://... drift run ports/eldato pairs   -> contains_product on neighbours by title
+struct Row { id: Int, title: Str, brand: Option[Str], label: Str }
+
+const QUERY: Str = "SELECT p.id, p.title, p.brand, coalesce(s.name, '') || ' ' || p.source AS label FROM products p LEFT JOIN stores s ON s.domain = p.source ORDER BY p.id"
+
+pub fn main() -> Result[(), Error] uses io, db, env, spawn, time {
+  let mode = env.args().get(1).unwrap_or("keys")
+  let c = db.open(env.get("ELDATO_DB").unwrap_or(""))?
+  let t0 = time.now_ms()
+  let rows: List[Row] = c.query(QUERY, ())?
+  let t1 = time.now_ms()
+  let out = if mode == "pairs" {
+    pairs(rows)
+  } else {
+    rows.par_map(|r| "{r.id}\t{identity_key(r.title, r.brand, r.label).unwrap_or("None")}")
+  }
+  let t2 = time.now_ms()
+  io.println(out.join("\n"))
+  io.eprintln("rows={rows.len()} load_ms={t1 - t0} compute_ms={t2 - t1}")
+  Ok(())
+}
+
+fn pairs(rows: List[Row]) -> List[Str] uses spawn {
+  let sorted = rows.sorted_by(|r| (r.title, r.id))
+  let idx = sorted.enumerate().skip(1).map(|p| first(p))
+  idx.par_map(|i| pair_line(sorted, i))
+}
+
+fn first(p: (Int, Row)) -> Int {
+  let (i, _) = p
+  i
+}
+
+fn pair_line(rows: List[Row], i: Int) -> Str {
+  match (rows.get(i - 1), rows.get(i)) {
+    (
+      Some(a),
+      Some(b),
+    ) => "{a.id}\t{b.id}\t{contains_product(a.title, b.title, b.brand)}\t{contains_product(b.title, a.title, a.brand)}"
+    _ => ""
+  }
+}

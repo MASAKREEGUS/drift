@@ -134,6 +134,21 @@ thread waiting, an empty queue and no progress panics. Verified with ThreadSanit
 `tests/programs/tasks.dr`), ASan/LSan, and the same output with `DRIFT_THREADS=1`.
 Known limits: a value leaked on an early `?` exit is reclaimed at process end; a panic in any task ends the program.
 
+## 7b. Phase 6: a real El Dato component
+`ports/eldato` is El Dato's `offers/identity.py` (product identity across stores: `identity_key`, a SHA-1 of the
+exact word set plus sizes, and `contains_product`) in Drift, with the original's test cases. Checked against the
+Python original on all 557,863 products of a restored backup: every key identical (402,326 with an identity) and
+all 1,115,724 `contains_product` results on neighbouring titles identical. CPU time on the HP (loaded by El Dato,
+so only user time is meaningful): keys 18.0 s vs 29.2 s in Python, pairs 85 s vs 108 s; memory 384 MB vs 615 MB.
+What the port needed, now in std: Unicode tables generated from Python's `unicodedata` (`tools/gen_unicode.py`,
+Unicode 16.0; `tools/check_unicode.py` compares all 1,112,053 code points: 0 mismatches) for case mapping,
+NFKD, combining classes and the alpha/alnum/space properties that regex `\w`/`\b` and `trim` use; `hash`
+(SHA-1, SHA-256, FNV-1a); `Set.difference`/`is_subset`/`is_empty`. Profiling (gprof) showed the regex engine at
+~65% of the time: unanchored searches now skip to bytes that can start a match (first-byte set computed at
+compile time and stored in the program) and reuse a per-thread VM instead of allocating one per call (30.7 s ->
+18.3 s). Next speedup: a lazy DFA for regexes. Writing the port also surfaced one habit the checker fixed on its
+own: `!x` → `not x` (`drift check --fix`).
+
 ## 8. Roadmap
 | Phase | Deliverable |
 |---|---|
@@ -143,5 +158,5 @@ Known limits: a value leaked on an early `?` exit is reclaimed at process end; a
 | 3 | ✅ C backend + runtime (refcount, copy-on-write Str/Bytes/List/Map/Set), `drift run/build/test`, contracts, isolated tests |
 | 4 | std: io, fs, json, str, time, env, proc, http client, re, html, db (sqlite/postgres); sandbox from `uses` |
 | 5 | ✅ Tasks + `spawn`/`par_map`/channels runtime (parallel, shared refcounts); next: `drift mcp`; eval runs vs Python/Rust |
-| 6 | Real workload: port an El Dato component and run it on the HP |
+| 6 | ✅ Real workload: El Dato identity.py ported, identical on 557,863 products, 1.6x less CPU than Python |
 | 7 | Self-hosting; own backend (connects to the compiler project) |

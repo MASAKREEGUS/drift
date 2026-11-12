@@ -1,0 +1,4 @@
+/// Digests. `sha1` and `sha256` return lowercase hex; `fnv1a` is the 64-bit FNV-1a (not cryptographic).
+pub fn sha1(data: Bytes) -> Str { todo }
+pub fn sha256(data: Bytes) -> Str { todo }
+pub fn fnv1a(data: Bytes) -> Int { todo }

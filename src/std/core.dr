@@ -76,6 +76,11 @@ pub fn bytes(self: Str) -> Bytes { todo }
 pub fn to_bytes(self: Str) -> Bytes { todo }
 pub fn to_lower(self: Str) -> Str { todo }
 pub fn to_upper(self: Str) -> Str { todo }
+/// Compatibility decomposition (Unicode NFKD): "Ñ" becomes "N" + U+0303, "ﬁ" becomes "fi", "²" becomes "2".
+pub fn nfkd(self: Str) -> Str { todo }
+/// Without combining marks (canonical combining class != 0). `s.to_lower().nfkd().strip_marks()` folds
+/// "Ñandú Pingüino" to "nandu pinguino".
+pub fn strip_marks(self: Str) -> Str { todo }
 pub fn trim(self: Str) -> Str { todo }
 pub fn trim_matches(self: Str, keep_out: fn(Str) -> Bool) -> Str { todo }
 pub fn split(self: Str, sep: Str) -> List[Str] { todo }
@@ -162,6 +167,10 @@ pub fn remove[T](var self: Set[T], item: T) -> Bool { todo }
 pub fn to_list[T](self: Set[T]) -> List[T] { todo }
 pub fn union[T](self: Set[T], other: Set[T]) -> Set[T] { todo }
 pub fn intersection[T](self: Set[T], other: Set[T]) -> Set[T] { todo }
+/// The items of `self` that are not in `other`.
+pub fn difference[T](self: Set[T], other: Set[T]) -> Set[T] { todo }
+pub fn is_subset[T](self: Set[T], other: Set[T]) -> Bool { todo }
+pub fn is_empty[T](self: Set[T]) -> Bool { todo }
 
 // ---- Option ----
 pub fn is_some[T](self: Option[T]) -> Bool { todo }

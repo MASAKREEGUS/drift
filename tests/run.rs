@@ -16,7 +16,7 @@ fn read(path: &str) -> String {
 
 #[test]
 fn golden_programs() {
-    for (name, code) in [("values", 0), ("closures", 0), ("control", 0), ("errors", 1), ("json", 0), ("regex", 0), ("html", 0), ("db", 0), ("tasks", 0)] {
+    for (name, code) in [("values", 0), ("closures", 0), ("control", 0), ("errors", 1), ("json", 0), ("regex", 0), ("html", 0), ("db", 0), ("tasks", 0), ("text", 0)] {
         let (out, err, c) = drift(&["run", &format!("tests/programs/{}.dr", name)]);
         assert_eq!(out, read(&format!("tests/programs/{}.out", name)), "{}: stderr:\n{}", name, err);
         assert_eq!(c, code, "{}: {}", name, err);
@@ -205,4 +205,12 @@ fn db_postgres_matches_sqlite() {
     let (out, err, c) = drift_env(&["run", "tests/programs/db.dr"], &[("DRIFT_DB", url.as_str())]);
     assert_eq!(c, 0, "{}", err);
     assert_eq!(out.replace(" postgres\n", " sqlite\n"), read("tests/programs/db.out"));
+}
+
+/// Phase 6: the port of El Dato's identity.py with the original's test cases.
+#[test]
+fn eldato_identity_port() {
+    let (out, err, c) = drift(&["test", "ports/eldato"]);
+    assert_eq!(c, 0, "{}\n{}", out, err);
+    assert!(out.contains("9 passed, 0 failed"), "{}", out);
 }
