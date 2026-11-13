@@ -1,0 +1,48 @@
+// Bit operators, integer literals, float display, heaps, filled lists, Map.insert, code points.
+
+enum Tally {
+  Hit(Int)
+  Miss
+}
+
+pub fn main() -> Result[(), Error] uses io {
+  io.println("{5 & 3} {5 | 3} {5 ^ 3} {1 << 62} {-16 >> 2} {1 + 2 << 3} {6 & 3 == 2}")
+  io.println("{0xff_ff & 0xf0f}")
+  io.println("{-9223372036854775808} {9_223_372_036_854_775_807} {-7 % 3} {7 % -3} {-7 / 2}")
+  io.println("{1500.0} {0.1 + 0.2} {1e16} {1e15} {0.00001} {-2.5e-7} {100.0}")
+  io.println("{"1.5e3".parse_float()}")
+  io.println("{"+5".parse_int()} {" 5".parse_int()} {"a\u{a0}b  c\td".split_whitespace()}")
+  var pq: List[(Int, Str)] = []
+  for (d, n) in [(5, "e"), (1, "b"), (3, "c"), (1, "a"), (9, "z"), (0, "o")] {
+    pq.heap_push((d, n))
+  }
+  var order: List[Str] = []
+  while true {
+    match pq.heap_pop() {
+      Some((d, n)) => order.push("{n}{d}")
+      None => break
+    }
+  }
+  io.println("{order} {pq.heap_pop()}")
+  var grid = List.filled(3, List.filled(2, 0))
+  grid[1][0] = 7
+  var m: Map[Str, Int] = {}
+  let a = m.insert("x", 1)
+  let b = m.insert("x", 2)
+  m["y"] = 3
+  io.println("{grid} {a} {b} {m}")
+  var hits = 0
+  var misses = 0
+  for t in [Tally.Hit(2), Tally.Miss, Tally.Hit(5), Tally.Miss] {
+    match t {
+      Tally.Hit(n) => hits += n
+      Tally.Miss => misses += 1
+    }
+  }
+  io.println("hits {hits} misses {misses}")
+  let cps = "añ€🙂".code_points()
+  io.println("{cps} {Str.from_code_points(cps)} {"ab€".chars()} {"héllo".bytes()[1]}")
+  let words = ["pear", "fig", "apple", "kiwi", "date"]
+  io.println("{[3, -1, 2, -1, 0].sorted()} {words.sorted_by(|w| w.len())}")
+  Ok(())
+}

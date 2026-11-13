@@ -395,3 +395,31 @@ fn db_rows_and_params_are_checked() {
     // and the effect is required
     assert_eq!(errors("fn f(c: db.Conn) -> Result[Int, db.DbError] {\n  c.exec(\"DELETE FROM t\", ())\n}\n"), vec!["E0301"]);
 }
+
+// ---------------------------------------------------------------- run2 additions
+
+#[test]
+fn integer_literal_out_of_range() {
+    assert_eq!(errors("fn f() -> Int {\n  9223372036854775808\n}\n"), vec!["E0216"]);
+    assert_eq!(errors("fn f() -> U8 {\n  256\n}\n"), vec!["E0216"]);
+    clean("fn f() -> Int {\n  -9223372036854775808\n}\n");
+    clean("fn f() -> Int {\n  1_000_000 + 0xff_ff\n}\n");
+}
+
+#[test]
+fn bit_operators_are_int_only() {
+    clean("fn f(a: Int, b: Int) -> Int {\n  (a & b) | (a ^ b) << 2 >> 1\n}\n");
+    assert_eq!(errors("fn f(a: Float) -> Float {\n  a & a\n}\n"), vec!["E0211"]);
+}
+
+#[test]
+fn assignment_in_match_arm() {
+    clean("fn f(o: Option[Int]) -> Int {\n  var n = 0\n  match o {\n    Some(v) => n += v,\n    None => n = -1,\n  }\n  n\n}\n");
+}
+
+#[test]
+fn layout_is_a_warning() {
+    let d = analyze_one("fn f() -> Int {\n    1\n}\n");
+    let f = d.iter().find(|d| d.code == "F0001").expect("F0001");
+    assert_eq!(f.severity, Severity::Warning);
+}

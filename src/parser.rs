@@ -890,11 +890,17 @@ impl<'a> Parser<'a> {
             Tok::P(P::Ge) => (7, 8, Infix::Bin(BinOp::Ge)),
             Tok::P(P::DotDot) => (9, 10, Infix::Range(false)),
             Tok::P(P::DotDotEq) => (9, 10, Infix::Range(true)),
-            Tok::P(P::Plus) => (11, 12, Infix::Bin(BinOp::Add)),
-            Tok::P(P::Minus) => (11, 12, Infix::Bin(BinOp::Sub)),
-            Tok::P(P::Star) => (13, 14, Infix::Bin(BinOp::Mul)),
-            Tok::P(P::Slash) => (13, 14, Infix::Bin(BinOp::Div)),
-            Tok::P(P::Percent) => (13, 14, Infix::Bin(BinOp::Rem)),
+            // bit operators: below arithmetic, above comparisons (Rust/Python order: << >> & ^ |)
+            Tok::P(P::Pipe) => (11, 12, Infix::Bin(BinOp::BitOr)),
+            Tok::P(P::Caret) => (13, 14, Infix::Bin(BinOp::BitXor)),
+            Tok::P(P::Amp) => (15, 16, Infix::Bin(BinOp::BitAnd)),
+            Tok::P(P::Shl) => (17, 18, Infix::Bin(BinOp::Shl)),
+            Tok::P(P::Shr) => (17, 18, Infix::Bin(BinOp::Shr)),
+            Tok::P(P::Plus) => (19, 20, Infix::Bin(BinOp::Add)),
+            Tok::P(P::Minus) => (19, 20, Infix::Bin(BinOp::Sub)),
+            Tok::P(P::Star) => (21, 22, Infix::Bin(BinOp::Mul)),
+            Tok::P(P::Slash) => (21, 22, Infix::Bin(BinOp::Div)),
+            Tok::P(P::Percent) => (21, 22, Infix::Bin(BinOp::Rem)),
             _ => return None,
         })
     }
@@ -909,7 +915,7 @@ impl<'a> Parser<'a> {
             }
             Tok::P(P::Minus) => {
                 self.bump();
-                let e = self.expr_bp(15)?;
+                let e = self.expr_bp(23)?;
                 Expr { span: lo.to(e.span), kind: ExprKind::Unary { op: UnOp::Neg, expr: Box::new(e) } }
             }
             _ => self.postfix()?,
@@ -1357,7 +1363,27 @@ impl<'a> Parser<'a> {
             let span = b.span;
             Expr { kind: ExprKind::Block(b), span }
         } else {
-            self.expr()?
+            let e = self.expr()?;
+            let op = match self.tok() {
+                Tok::P(P::Eq) => Some(AssignOp::Set),
+                Tok::P(P::PlusEq) => Some(AssignOp::Add),
+                Tok::P(P::MinusEq) => Some(AssignOp::Sub),
+                Tok::P(P::StarEq) => Some(AssignOp::Mul),
+                Tok::P(P::SlashEq) => Some(AssignOp::Div),
+                Tok::P(P::PercentEq) => Some(AssignOp::Rem),
+                _ => None,
+            };
+            match op {
+                // `None => count += 1`: an assignment arm is a block with that one statement
+                Some(op) if matches!(e.kind, ExprKind::Name(_) | ExprKind::Field { .. } | ExprKind::Index { .. }) => {
+                    self.bump();
+                    let value = self.expr()?;
+                    let span = e.span.to(value.span);
+                    let stmt = Stmt { kind: StmtKind::Assign { target: e, op, value }, span };
+                    Expr { kind: ExprKind::Block(Block { stmts: vec![stmt], span }), span }
+                }
+                _ => e,
+            }
         };
         Ok(Arm { pat, guard, span: lo.to(body.span), body })
     }

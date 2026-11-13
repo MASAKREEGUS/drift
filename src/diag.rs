@@ -203,7 +203,13 @@ pub fn render_human(d: &Diag, file: &str, idx: &LineIndex) -> String {
         s.push_str(&format!("       = in scope: {}\n", items.join(", ")));
     }
     for e in &d.fix {
-        s.push_str(&format!("       = fix: replace {}..{} with {}\n", e.span.lo, e.span.hi, json_str(&e.text)));
+        let (l1, c1) = idx.line_col(e.span.lo);
+        let (l2, c2) = idx.line_col(e.span.hi);
+        if e.span.lo == e.span.hi {
+            s.push_str(&format!("       = fix: insert {} at {}:{}\n", json_str(&e.text), l1, c1));
+        } else {
+            s.push_str(&format!("       = fix: replace {}:{}..{}:{} with {}\n", l1, c1, l2, c2, json_str(&e.text)));
+        }
     }
     s
 }

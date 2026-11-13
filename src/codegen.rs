@@ -184,7 +184,7 @@ pub fn generate(p: &Program, target: &Target) -> String {
                 _ => false,
             };
             main_code.push_str(&format!(
-                "int main(int argc, char** argv) {{\n  d_init(argc, argv);\n  d_sandbox({});\n  d_init_lits();\n  V r = f_{}();\n  return d_finish_main(r, {});\n}}\n",
+                "int main(int argc, char** argv) {{\n  d_init(argc, argv);\n  d_sandbox({});\n  d_init_lits();\n  return d_run_main(f_{}, {});\n}}\n",
                 info.effects, main, is_result as i32
             ));
         }
@@ -856,6 +856,27 @@ impl<'p> Gen<'p> {
 
     // ------------------------------------------------------------ expressions
 
+    /// The C lvalue of a local variable named by `e`, read without taking a reference (borrowed).
+    fn borrow_local(&mut self, e: &Expr) -> Option<String> {
+        let ExprKind::Name(n) = &e.kind else { return None };
+        match self.lookup(n) {
+            Some(Loc::Var(c)) => Some(c),
+            Some(Loc::Ptr(c)) => Some(format!("(*{})", c)),
+            _ => None,
+        }
+    }
+
+    /// Expressions that cannot change any variable while they are evaluated (no calls).
+    fn is_plain(e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Name(_) | ExprKind::Int(_) | ExprKind::Bool(_) => true,
+            ExprKind::Binary { lhs, rhs, .. } => Self::is_plain(lhs) && Self::is_plain(rhs),
+            ExprKind::Unary { expr, .. } => Self::is_plain(expr),
+            ExprKind::Field { base, .. } => Self::is_plain(base),
+            _ => false,
+        }
+    }
+
     fn expr(&mut self, e: &Expr) -> String {
         match &e.kind {
             ExprKind::Int(s) => format!("d_int({})", c_int(int_lit(s))),
@@ -922,11 +943,21 @@ impl<'p> Gen<'p> {
                 self.tmp(format!("d_with({}, {}, (int[]){{{}}}, (V[]){{{}}})", b, idx.len(), idx.join(", "), vals.join(", ")))
             }
             ExprKind::Index { base, index } => {
+                if Self::is_plain(index) {
+                    if let Some(b) = self.borrow_local(base) {
+                        let i = self.expr(index);
+                        return self.tmp(format!("d_index_b({}, {})", b, i));
+                    }
+                }
                 let b = self.expr(base);
                 let i = self.expr(index);
                 self.tmp(format!("d_index({}, {})", b, i))
             }
             ExprKind::Call { .. } => self.call(e),
+            ExprKind::Unary { op: UnOp::Neg, expr } if matches!(expr.kind, ExprKind::Int(_)) => {
+                let ExprKind::Int(t) = &expr.kind else { unreachable!() };
+                format!("d_int({})", c_int(-int_lit(t)))
+            }
             ExprKind::Unary { op, expr } => {
                 let v = self.expr(expr);
                 match op {
@@ -1157,6 +1188,11 @@ impl<'p> Gen<'p> {
             BinOp::Mul => "d_mul",
             BinOp::Div => "d_div",
             BinOp::Rem => "d_rem",
+            BinOp::BitAnd => "d_band",
+            BinOp::BitOr => "d_bor",
+            BinOp::BitXor => "d_bxor",
+            BinOp::Shl => "d_shl",
+            BinOp::Shr => "d_shr",
             BinOp::Eq => "d_op_eq",
             BinOp::Ne => "d_op_ne",
             BinOp::Lt => "d_op_lt",
@@ -1178,6 +1214,16 @@ impl<'p> Gen<'p> {
                 };
                 let ExprKind::Field { base, .. } = &field.kind else { return self.internal("method") };
                 let var_self = self.p.fns[fid].params.first().map_or(false, |p| p.mutable);
+                // `xs.len()` / `xs.is_empty()` on a local: no reference taken, no call
+                let fname = self.p.fns[fid].name.clone();
+                if args.is_empty() && !var_self && self.is_std(self.p.fns[fid].module) && (fname == "len" || fname == "is_empty") {
+                    let recv = matches!(self.p.fns[fid].params.first().map(|p| &p.ty), Some(Ty::Named(d, _)) if matches!(self.p.defs[*d].name.as_str(), "List" | "Bytes" | "Map" | "Set" | "Str"));
+                    if recv {
+                        if let Some(b) = self.borrow_local(base) {
+                            return if fname == "len" { format!("d_int(d_len_b({}))", b) } else { format!("d_bool(d_len_b({}) == 0)", b) };
+                        }
+                    }
+                }
                 let mut vs = Vec::new();
                 if var_self {
                     let rest: Vec<String> = args.iter().map(|a| self.expr(a)).collect();

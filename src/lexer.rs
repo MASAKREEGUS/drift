@@ -98,7 +98,7 @@ impl Kw {
 pub enum P {
     LParen, RParen, LBracket, RBracket, LBrace, RBrace, Comma, Dot, DotDot, DotDotEq, Colon, Semi,
     Arrow, FatArrow, Pipe, Question, Plus, Minus, Star, Slash, Percent, Eq, EqEq, Ne, Lt, Le, Gt, Ge,
-    PlusEq, MinusEq, StarEq, SlashEq, PercentEq,
+    PlusEq, MinusEq, StarEq, SlashEq, PercentEq, Amp, Caret, Shl, Shr,
 }
 
 impl P {
@@ -125,6 +125,10 @@ impl P {
             P::Star => "*",
             P::Slash => "/",
             P::Percent => "%",
+            P::Amp => "&",
+            P::Caret => "^",
+            P::Shl => "<<",
+            P::Shr => ">>",
             P::Eq => "=",
             P::EqEq => "==",
             P::Ne => "!=",
@@ -365,7 +369,7 @@ impl<'a> Lexer<'a> {
             if self.pos == digits_lo {
                 self.err("L0004", lo, self.pos, "number literal has no digits after its prefix");
             }
-            let text = self.src[lo..self.pos].replace('_', "");
+            let text = self.src[lo..self.pos].to_string();
             self.push(Tok::Int(text), lo);
             return;
         }
@@ -391,7 +395,7 @@ impl<'a> Lexer<'a> {
             }
             self.err("L0004", bad_lo, self.pos, "numeric literals take no suffix; use a conversion such as `x.to_u8()`");
         }
-        let text = self.src[lo..self.pos].replace('_', "");
+        let text = self.src[lo..self.pos].to_string();
         self.push(if float { Tok::Float(text) } else { Tok::Int(text) }, lo);
     }
 
@@ -800,6 +804,8 @@ impl<'a> Lexer<'a> {
             (b'=', b'>') => (P::FatArrow, 2),
             (b'=', b'=') => (P::EqEq, 2),
             (b'!', b'=') => (P::Ne, 2),
+            (b'<', b'<') => (P::Shl, 2),
+            (b'>', b'>') => (P::Shr, 2),
             (b'<', b'=') => (P::Le, 2),
             (b'>', b'=') => (P::Ge, 2),
             (b'+', b'=') => (P::PlusEq, 2),
@@ -820,6 +826,8 @@ impl<'a> Lexer<'a> {
             (b':', _) => (P::Colon, 1),
             (b';', _) => (P::Semi, 1),
             (b'|', _) => (P::Pipe, 1),
+            (b'&', b) if b != b'&' => (P::Amp, 1),
+            (b'^', _) => (P::Caret, 1),
             (b'?', _) => (P::Question, 1),
             (b'+', _) => (P::Plus, 1),
             (b'-', _) => (P::Minus, 1),

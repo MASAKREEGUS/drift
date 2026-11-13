@@ -116,6 +116,12 @@ static inline V d_rem(V a, V b) {
   }
   return d_float(fmod(a.f, b.f));
 }
+static inline V d_band(V a, V b) { return d_int(a.i & b.i); }
+static inline V d_bor(V a, V b) { return d_int(a.i | b.i); }
+static inline V d_bxor(V a, V b) { return d_int(a.i ^ b.i); }
+/* shifts: the amount must be 0..=63; `<<` drops the bits shifted out, `>>` keeps the sign */
+static inline V d_shl(V a, V b) { if ((uint64_t)b.i > 63) d_panic_c("shift amount out of range 0..=63 in `<<`"); return d_int((int64_t)((uint64_t)a.i << b.i)); }
+static inline V d_shr(V a, V b) { if ((uint64_t)b.i > 63) d_panic_c("shift amount out of range 0..=63 in `>>`"); return d_int(a.i >> b.i); }
 static inline V d_neg(V a) {
   if (a.k == K_INT) { if (a.i == INT64_MIN) d_panic_c("integer overflow in `-`"); return d_int(-a.i); }
   return d_float(-a.f);
@@ -156,8 +162,48 @@ static inline int64_t d_llen(V v) { return ((DList*)v.o)->len; }
 V d_list_rest(V v, int64_t n);
 V d_take0(V v);
 V* d_mut_field(V* p, int i);
-V* d_mut_index(V* p, V key, int insert);
+V* d_mut_index_slow(V* p, V key, int insert);
 V d_index(V base, V idx);
+int64_t d_iter_len_slow(V it);
+V d_iter_at_slow(V it, int64_t i);
+int64_t d_str_nchars(V s);
+/* Fast paths the C compiler can inline into loops. `_b` functions borrow their first argument. */
+static inline V d_index_b(V base, V idx) {
+  if (base.k == K_LIST) {
+    DList* l = (DList*)base.o;
+    if ((uint64_t)idx.i < (uint64_t)l->len) return d_retain(l->items[idx.i]);
+  } else if (base.k == K_BYTES) {
+    DStr* s = (DStr*)base.o;
+    if ((uint64_t)idx.i < (uint64_t)s->len) return d_int((unsigned char)s->p[idx.i]);
+  }
+  return d_index(d_retain(base), idx);
+}
+static inline V* d_mut_index(V* p, V key, int insert) {
+  if (p->k == K_LIST) {
+    DList* l = (DList*)p->o;
+    if (__atomic_load_n(&l->h.rc, __ATOMIC_RELAXED) == 1 && (uint64_t)key.i < (uint64_t)l->len) return &l->items[key.i];
+  }
+  return d_mut_index_slow(p, key, insert);
+}
+static inline int64_t d_iter_len(V it) {
+  if (it.k == K_LIST) return ((DList*)it.o)->len;
+  if (it.k == K_RANGE) return ((DRange*)it.o)->hi - ((DRange*)it.o)->lo;
+  return d_iter_len_slow(it);
+}
+static inline V d_iter_at(V it, int64_t i) {
+  if (it.k == K_LIST) return d_retain(((DList*)it.o)->items[i]);
+  if (it.k == K_RANGE) return d_int(((DRange*)it.o)->lo + i);
+  return d_iter_at_slow(it, i);
+}
+static inline int64_t d_len_b(V v) {
+  switch (v.k) {
+  case K_LIST: return ((DList*)v.o)->len;
+  case K_BYTES: return ((DStr*)v.o)->len;
+  case K_MAP: case K_SET: return ((DMap*)v.o)->len;
+  case K_STR: return ((DStr*)v.o)->nchars >= 0 ? ((DStr*)v.o)->nchars : d_str_nchars(v);
+  default: return 0;
+  }
+}
 V d_range(V lo, V hi, int inclusive);
 int64_t d_iter_len(V it);
 V d_iter_at(V it, int64_t i);
@@ -180,5 +226,6 @@ void d_init(int argc, char** argv);
 /* Restrict the process to the effects in `bits` (bit i = check::EFFECTS[i]): Landlock + seccomp. */
 void d_sandbox(int bits);
 int d_finish_main(V r, int is_result);
+int d_run_main(V (*f)(void), int is_result);
 int d_run_tests(const DTest* tests, int n, int argc, char** argv);
 #endif

@@ -12,9 +12,7 @@ pub fn main() -> Result[(), Error] uses io, spawn {
   var n = 0
   loop {
     match rx.recv() {
-      Some(_) => {
-        n += 1
-      }
+      Some(_) => n += 1
       None => break
     }
   }

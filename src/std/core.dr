@@ -34,6 +34,12 @@ pub struct Error { message: Str }
 
 pub fn error(message: Str) -> Error { todo }
 pub fn panic(message: Str) -> Never { todo }
+/// Ends the program now with exit status `code`; standard output and error are flushed first.
+pub fn exit(code: Int) -> Never
+  requires code >= 0 and code <= 255
+{
+  todo
+}
 pub fn channel[T](capacity: Int) -> (Sender[T], Receiver[T])
   requires capacity >= 0
 {
@@ -73,6 +79,10 @@ pub fn len(self: Str) -> Int { todo }
 pub fn is_empty(self: Str) -> Bool { todo }
 pub fn chars(self: Str) -> List[Str] { todo }
 pub fn bytes(self: Str) -> Bytes { todo }
+/// Unicode code points as integers (no allocation per character, unlike `chars`).
+pub fn code_points(self: Str) -> List[Int] { todo }
+/// The text of the given code points; panics on a surrogate or a value above 0x10FFFF.
+pub fn Str.from_code_points(points: List[Int]) -> Str { todo }
 pub fn to_bytes(self: Str) -> Bytes { todo }
 pub fn to_lower(self: Str) -> Str { todo }
 pub fn to_upper(self: Str) -> Str { todo }
@@ -114,7 +124,17 @@ pub fn is_empty[T](self: List[T]) -> Bool { todo }
 pub fn get[T](self: List[T], index: Int) -> Option[T] { todo }
 pub fn first[T](self: List[T]) -> Option[T] { todo }
 pub fn last[T](self: List[T]) -> Option[T] { todo }
+/// A list of `n` copies of `item`: `List.filled(n, 0)`.
+pub fn List.filled[T](n: Int, item: T) -> List[T]
+  requires n >= 0
+{
+  todo
+}
 pub fn push[T](var self: List[T], item: T) -> () { todo }
+/// Binary min-heap on a list, ordered by `<` (like Python's heapq): `pq.heap_push((dist, node))`, then
+/// `pq.heap_pop()` returns the smallest item. O(log n). `pq.first()` peeks.
+pub fn heap_push[T](var self: List[T], item: T) -> () { todo }
+pub fn heap_pop[T](var self: List[T]) -> Option[T] { todo }
 pub fn pop[T](var self: List[T]) -> Option[T] { todo }
 pub fn insert[T](var self: List[T], index: Int, item: T) -> () { todo }
 pub fn remove[T](var self: List[T], index: Int) -> T { todo }
@@ -154,6 +174,8 @@ pub fn is_empty[K, V](self: Map[K, V]) -> Bool { todo }
 pub fn get[K, V](self: Map[K, V], key: K) -> Option[V] { todo }
 pub fn contains_key[K, V](self: Map[K, V], key: K) -> Bool { todo }
 pub fn remove[K, V](var self: Map[K, V], key: K) -> Option[V] { todo }
+/// Same as `m[key] = value`; returns the previous value.
+pub fn insert[K, V](var self: Map[K, V], key: K, value: V) -> Option[V] { todo }
 pub fn keys[K, V](self: Map[K, V]) -> List[K] { todo }
 pub fn values[K, V](self: Map[K, V]) -> List[V] { todo }
 pub fn entries[K, V](self: Map[K, V]) -> List[(K, V)] { todo }

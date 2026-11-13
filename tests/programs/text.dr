@@ -7,9 +7,9 @@ pub fn main() -> Result[(), Error] uses io {
   io.println(s.to_lower().nfkd().strip_marks())
   io.println("{"한국".nfkd().len()} {"ȩ́".nfkd() == "ȩ́"} {"ὦ".nfkd().strip_marks()}")
   io.println(
-    "{"añoΩ".is_alphabetic()} {"x²".is_alphanumeric()} {"  　".is_whitespace()} {"€".is_alphabetic()}",
+    "{"añoΩ".is_alphabetic()} {"x²".is_alphanumeric()} {"\u{a0}\u{2003}\u{3000}".is_whitespace()} {"€".is_alphabetic()}",
   )
-  io.println("[{"  hola 　".trim()}]")
+  io.println("[{"\u{a0} hola \u{3000}".trim()}]")
   // regex \w and \b follow the same definition
   let w = re.compile(r"\b\w+\b")?
   io.println("{w.find_all("niño café x²·y").map(|m| m.text)}")

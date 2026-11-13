@@ -30,9 +30,7 @@ fn consume(rx: Receiver[Int]) -> Int uses spawn {
   var sum = 0
   loop {
     match rx.recv() {
-      Some(x) => {
-        sum += x
-      }
+      Some(x) => sum += x
       None => break
     }
   }

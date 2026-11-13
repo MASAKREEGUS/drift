@@ -16,7 +16,7 @@ fn read(path: &str) -> String {
 
 #[test]
 fn golden_programs() {
-    for (name, code) in [("values", 0), ("closures", 0), ("control", 0), ("errors", 1), ("json", 0), ("regex", 0), ("html", 0), ("db", 0), ("tasks", 0), ("text", 0)] {
+    for (name, code) in [("values", 0), ("closures", 0), ("control", 0), ("errors", 1), ("json", 0), ("regex", 0), ("html", 0), ("db", 0), ("tasks", 0), ("text", 0), ("numeric", 0)] {
         let (out, err, c) = drift(&["run", &format!("tests/programs/{}.dr", name)]);
         assert_eq!(out, read(&format!("tests/programs/{}.out", name)), "{}: stderr:\n{}", name, err);
         assert_eq!(c, code, "{}: {}", name, err);
@@ -248,4 +248,21 @@ fn mcp_server() {
     assert!(lines[4].contains(r#""timed_out":true"#), "{}", lines[4]);
     assert!(lines[5].contains(r#""code":-32602"#), "{}", lines[5]);
     assert!(lines[6].contains(r#""code":-32700"#), "{}", lines[6]);
+}
+
+#[test]
+fn exit_status_and_deep_recursion() {
+    let dir = std::env::temp_dir().join(format!("drift-exit-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("main.dr");
+    std::fs::write(&p, "fn depth(n: Int) -> Int {\n  if n == 0 {\n    return 0\n  }\n  1 + depth(n - 1)\n}\n\npub fn main() -> Result[(), Error] uses io, env {\n  let n = env.args().get(1).unwrap_or(\"0\").parse_int().unwrap_or(0)\n  io.println(\"depth {depth(n)}\")\n  if n == 7 {\n    exit(7)\n  }\n  Ok(())\n}\n").unwrap();
+    let f = p.to_str().unwrap();
+    let (out, err, c) = drift(&["run", f, "1000000"]);
+    assert_eq!((out.as_str(), c), ("depth 1000000\n", 0), "{}", err);
+    let (out, _, c) = drift(&["run", f, "7"]);
+    assert_eq!((out.as_str(), c), ("depth 7\n", 7));
+    let (_, err, c) = drift(&["run", f, "100000000"]);
+    assert_eq!(c, 101, "{}", err);
+    assert!(err.contains("stack overflow"), "{}", err);
+    std::fs::remove_dir_all(&dir).ok();
 }

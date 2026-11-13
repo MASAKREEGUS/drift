@@ -24,6 +24,7 @@
 #include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <pthread.h>
+#include <sys/mman.h>
 
 _Thread_local const char* d_loc_file = "?";
 _Thread_local int d_loc_line = 0;
@@ -581,13 +582,22 @@ uint64_t d_hash(V v) {
 static void show_float(DBuf* b, double f) {
   if (isnan(f)) { buf_cstr(b, "NaN"); return; }
   if (isinf(f)) { buf_cstr(b, f > 0 ? "inf" : "-inf"); return; }
-  char s[40];
-  for (int p = 1; p <= 17; p++) {
-    snprintf(s, sizeof s, "%.*g", p, f);
+  /* like Python's repr: the shortest digits that round-trip; positional for exponents -4..15 */
+  char s[400];
+  int p = 1;
+  for (; p < 17; p++) {
+    snprintf(s, sizeof s, "%.*e", p - 1, f);
     if (strtod(s, NULL) == f) break;
   }
-  buf_cstr(b, s);
-  if (!strpbrk(s, ".eEn")) buf_cstr(b, ".0");
+  snprintf(s, sizeof s, "%.*e", p - 1, f);
+  int x = atoi(strchr(s, 'e') + 1);
+  if (x >= -4 && x < 16) {
+    snprintf(s, sizeof s, "%.*f", p - 1 - x > 0 ? p - 1 - x : 0, f);
+    buf_cstr(b, s);
+    if (!strchr(s, '.')) buf_cstr(b, ".0");
+  } else {
+    buf_cstr(b, s);
+  }
 }
 static void show_quoted(DBuf* b, const char* p, int64_t n, int bytes) {
   if (bytes) buf_ch(b, 'b');
@@ -736,7 +746,7 @@ V d_index(V base, V idx) {
   }
   d_panic_c("internal: indexing an unsupported value");
 }
-V* d_mut_index(V* p, V key, int insert) {
+V* d_mut_index_slow(V* p, V key, int insert) {
   if (p->k == K_LIST) {
     list_unique(p);
     DList* l = L(*p);
@@ -754,7 +764,7 @@ V d_range(V lo, V hi, int inclusive) {
   r->lo = lo.i; r->hi = h;
   return mk(K_RANGE, r);
 }
-int64_t d_iter_len(V it) {
+int64_t d_iter_len_slow(V it) {
   switch (it.k) {
   case K_LIST: return L(it)->len;
   case K_RANGE: return ((DRange*)it.o)->hi - ((DRange*)it.o)->lo;
@@ -762,7 +772,7 @@ int64_t d_iter_len(V it) {
   default: d_panic_c("internal: iterating an unsupported value");
   }
 }
-V d_iter_at(V it, int64_t i) {
+V d_iter_at_slow(V it, int64_t i) {
   switch (it.k) {
   case K_LIST: return d_retain(L(it)->items[i]);
   case K_RANGE: return d_int(((DRange*)it.o)->lo + i);
@@ -886,6 +896,59 @@ int d_finish_main(V r, int is_result) {
   d_release(r);
   fflush(stdout);
   return code;
+}
+/* `main` runs on a thread with a 1 GiB stack (reserved lazily), so deep recursion works; running out of it
+   is reported as a panic (exit 101) instead of a bare segmentation fault. */
+#define D_MAIN_STACK ((size_t)1 << 30)
+static char* d_main_stack_lo;
+static void d_segv(int sig, siginfo_t* si, void* uc) {
+  (void)sig; (void)uc;
+  char* a = (char*)si->si_addr;
+  int overflow = d_main_stack_lo && a >= d_main_stack_lo - (1 << 20) && a < d_main_stack_lo + (1 << 20);
+  fflush(stdout);
+  char b[512];
+  int n = overflow ? snprintf(b, sizeof b, "panic at %s:%d: stack overflow (recursion deeper than the 1 GiB stack allows)\n", d_loc_file, d_loc_line)
+                   : snprintf(b, sizeof b, "internal error: memory fault at %s:%d (a bug in the Drift runtime)\n", d_loc_file, d_loc_line);
+  if (n > 0) { ssize_t w = write(2, b, (size_t)n); (void)w; }
+  _exit(overflow ? 101 : 134);
+}
+typedef struct { V (*f)(void); int is_result; int code; } DMainArg;
+static void* d_main_thread(void* p) {
+  DMainArg* m = p;
+  /* page-aligned and mmap'd: sanitizers unmap a thread's alternate stack when it exits */
+  size_t altsz = 64 * 1024;
+  void* alt = mmap(NULL, altsz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (alt != MAP_FAILED) {
+    stack_t ss = { .ss_sp = alt, .ss_size = altsz, .ss_flags = 0 };
+    sigaltstack(&ss, NULL);
+  }
+  pthread_attr_t at;
+  if (pthread_getattr_np(pthread_self(), &at) == 0) {
+    void* lo; size_t sz;
+    if (pthread_attr_getstack(&at, &lo, &sz) == 0) d_main_stack_lo = lo;
+    pthread_attr_destroy(&at);
+  }
+  m->code = d_finish_main(m->f(), m->is_result);
+  return NULL;
+}
+int d_run_main(V (*f)(void), int is_result) {
+  struct sigaction sa;
+  memset(&sa, 0, sizeof sa);
+  sa.sa_sigaction = d_segv;
+  sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+  sigemptyset(&sa.sa_mask);
+  sigaction(SIGSEGV, &sa, NULL);
+  DMainArg m = { f, is_result, 0 };
+  pthread_attr_t at;
+  pthread_t th;
+  pthread_attr_init(&at);
+  pthread_attr_setstacksize(&at, D_MAIN_STACK);
+  pthread_attr_setguardsize(&at, 64 * 1024);
+  int ok = pthread_create(&th, &at, d_main_thread, &m) == 0;
+  pthread_attr_destroy(&at);
+  if (!ok) return d_finish_main(f(), is_result);   /* no memory for a big stack: run on this one */
+  pthread_join(th, NULL);
+  return m.code;
 }
 static void json_str_out(const char* s) {
   putchar('"');
@@ -1032,12 +1095,22 @@ V d_n_core_Str_is_alphanumeric(V s) { return str_all(s, is_alnum); }
 V d_n_core_Str_is_alphabetic(V s) { return str_all(s, is_alpha); }
 V d_n_core_Str_is_numeric(V s) { return str_all(s, is_digit); }
 V d_n_core_Str_is_whitespace(V s) { return str_all(s, is_ws); }
+int64_t d_str_nchars(V s) { return str_chars(S(s)); }
 V d_n_core_Str_len(V s) { V r = d_int(str_chars(S(s))); d_release(s); return r; }
 V d_n_core_Str_is_empty(V s) { V r = d_bool(S(s)->len == 0); d_release(s); return r; }
+/* one immortal string per ASCII character: `chars` of ASCII text allocates nothing per character */
+static V ascii_char[128];
+__attribute__((constructor)) static void ascii_char_init(void) {
+  for (int c = 0; c < 128; c++) { char ch = (char)c; ascii_char[c] = d_str_const(&ch, 1); S(ascii_char[c])->nchars = 1; }
+}
 V d_n_core_Str_chars(V s) {
   DStr* x = S(s);
   V r = list_new(x->len);
-  for (int64_t i = 0; i < x->len;) { int l = utf8_len((unsigned char)x->p[i]); if (i + l > x->len) l = 1; lpush(r, d_str_new(x->p + i, l)); i += l; }
+  for (int64_t i = 0; i < x->len;) {
+    unsigned char ch = (unsigned char)x->p[i];
+    if (ch < 0x80) { lpush(r, ascii_char[ch]); i++; continue; }
+    int l = utf8_len(ch); if (i + l > x->len) l = 1; lpush(r, d_str_new(x->p + i, l)); i += l;
+  }
   d_release(s);
   return r;
 }
@@ -1104,9 +1177,11 @@ V d_n_core_Str_split_whitespace(V s) {
   V r = list_new(4);
   int64_t i = 0;
   while (i < x->len) {
-    while (i < x->len && ascii_ws(x->p[i])) i++;
+    /* Unicode whitespace, like Python's str.split() */
+    int l;
+    while (i < x->len && is_ws(utf8_at(x->p, x->len, i, &l))) i += l;
     int64_t st = i;
-    while (i < x->len && !ascii_ws(x->p[i])) i++;
+    while (i < x->len && !is_ws(utf8_at(x->p, x->len, i, &l))) i += l;
     if (i > st) lpush(r, d_str_new(x->p + st, i - st));
   }
   d_release(s);
@@ -1322,6 +1397,23 @@ static void msort(KV* a, KV* tmp, int64_t n) {
   while (j < n) tmp[k++] = a[j++];
   memcpy(a, tmp, (size_t)n * sizeof(KV));
 }
+/* every key an Int: plain integer compares (same order as d_cmp_b, still stable) */
+static void msort_int(KV* a, KV* tmp, int64_t n) {
+  if (n < 2) return;
+  if (n <= 16) {
+    for (int64_t i = 1; i < n; i++) { KV x = a[i]; int64_t j = i; while (j > 0 && a[j - 1].key.i > x.key.i) { a[j] = a[j - 1]; j--; } a[j] = x; }
+    return;
+  }
+  int64_t m = n / 2;
+  msort_int(a, tmp, m);
+  msort_int(a + m, tmp, n - m);
+  if (a[m - 1].key.i <= a[m].key.i) return;
+  int64_t i = 0, j = m, k = 0;
+  while (i < m && j < n) tmp[k++] = a[j].key.i < a[i].key.i ? a[j++] : a[i++];
+  while (i < m) tmp[k++] = a[i++];
+  while (j < n) tmp[k++] = a[j++];
+  memcpy(a, tmp, (size_t)n * sizeof(KV));
+}
 static V sort_list(V l, V key) {
   int64_t n = L(l)->len;
   KV* a = xmalloc((size_t)n * sizeof(KV));
@@ -1330,7 +1422,9 @@ static V sort_list(V l, V key) {
     a[i].item = d_retain(L(l)->items[i]);
     a[i].key = key.k == K_FN ? call1(key, d_retain(a[i].item)) : a[i].item;
   }
-  msort(a, t, n);
+  int all_int = 1;
+  for (int64_t i = 0; i < n && all_int; i++) all_int = a[i].key.k == K_INT;
+  if (all_int) msort_int(a, t, n); else msort(a, t, n);
   V r = list_new(n);
   for (int64_t i = 0; i < n; i++) { lpush(r, a[i].item); if (key.k == K_FN) d_release(a[i].key); }
   free(a); free(t);
@@ -5581,5 +5675,77 @@ V d_n_core_Str_strip_marks(V s) {
     i += l;
   }
   d_release(s);
+  return buf_done_kind(&b, K_STR);
+}
+
+/* ------------------------------------------------------------------ exit, List.filled, heaps, Map.insert, code points */
+V d_n_core_exit(V code) {
+  fflush(stdout);
+  fflush(stderr);
+  exit((int)code.i);
+}
+V d_n_core_List__filled(V n, V item) {
+  V r = list_new(n.i);
+  for (int64_t i = 0; i < n.i; i++) lpush(r, d_retain(item));
+  d_release(item);
+  return r;
+}
+static void heap_swap(V* a, V* b) { V t = *a; *a = *b; *b = t; }
+V d_n_core_List_heap_push(V* l, V x) {
+  list_unique(l);
+  lpush(*l, x);
+  DList* d = L(*l);
+  for (int64_t i = d->len - 1; i > 0;) {
+    int64_t p = (i - 1) / 2;
+    if (d_cmp_b(d->items[i], d->items[p]) >= 0) break;
+    heap_swap(&d->items[i], &d->items[p]);
+    i = p;
+  }
+  return D_UNIT;
+}
+V d_n_core_List_heap_pop(V* l) {
+  list_unique(l);
+  DList* d = L(*l);
+  if (d->len == 0) return d_none();
+  V top = d->items[0];
+  d->len--;
+  if (d->len > 0) {
+    d->items[0] = d->items[d->len];
+    for (int64_t i = 0;;) {
+      int64_t a = 2 * i + 1, b = a + 1, m = i;
+      if (a < d->len && d_cmp_b(d->items[a], d->items[m]) < 0) m = a;
+      if (b < d->len && d_cmp_b(d->items[b], d->items[m]) < 0) m = b;
+      if (m == i) break;
+      heap_swap(&d->items[i], &d->items[m]);
+      i = m;
+    }
+  }
+  return d_some(top);
+}
+V d_n_core_Map_insert(V* m, V k, V v) {
+  map_unique(m);
+  DMap* d = M(*m);
+  uint64_t h = d_hash(k);
+  int64_t ix = map_find(d, k, h);
+  if (ix >= 0) { V old = d->e[ix].val; d->e[ix].val = v; d_release(k); return d_some(old); }
+  map_add_new(d, k, v, h);
+  return d_none();
+}
+V d_n_core_Str_code_points(V s) {
+  DStr* x = S(s);
+  V r = list_new(x->len);
+  for (int64_t i = 0; i < x->len;) { int l; uint32_t c = utf8_at(x->p, x->len, i, &l); lpush(r, d_int(c)); i += l; }
+  d_release(s);
+  return r;
+}
+V d_n_core_Str__from_code_points(V l) {
+  DBuf b; d_buf_init(&b);
+  DList* d = L(l);
+  for (int64_t i = 0; i < d->len; i++) {
+    int64_t c = d->items[i].i;
+    if (c < 0 || c > 0x10FFFF || (c >= 0xD800 && c <= 0xDFFF)) panicf("%lld is not a Unicode scalar value", (long long)c);
+    utf8_put(&b, (uint32_t)c);
+  }
+  d_release(l);
   return buf_done_kind(&b, K_STR);
 }

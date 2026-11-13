@@ -34,7 +34,7 @@ List[T]  Map[K, V] (insertion-ordered)  Set[T]  Option[T]  Result[T, E]
 - Optional local annotation: `let xs: List[Int] = []`. Required only when the type cannot be inferred.
 - `+` concatenates `Str`, `Bytes` and `List`. Float `<` is IEEE total order, so sorting floats is defined.
 - Resources (`fs.File`, sockets, `db.Conn`, `Task[T]`) are opaque handle values; the OS resource is released when the last copy is dropped.
-- Integer overflow, division by zero and out-of-range indexing `xs[i]` panic. Use `xs.get(i)` for `Option`.
+- Integer overflow, division by zero and out-of-range indexing `xs[i]` panic. Use `xs.get(i)` for `Option`. An integer literal that does not fit its type is a compile error (E0216); `1_000_000` is fine.
 - Mixing numeric types is an error: `n.to_float()`, `x.to_int()` (truncates), `n.to_u8()?` (checked, returns Option).
 - Every struct/enum gets `==`, `<` (ordering by declaration), `hash` and `show` when all of its fields support them.
 
@@ -70,6 +70,9 @@ var total = 0        // mutable, local only
 total += x           // = += -= *= /= %=
 var xs = [1, 2]
 xs.push(3)           // methods with `var self` require a `var` receiver
+xs[0] = 9            // element assignment; also `xs[i] += 1`
+var m: Map[Str, Int] = {}
+m["a"] = 1           // insert or replace (same as `m.insert("a", 1)`, which returns the old value)
 var p = Point { x: 0.0, y: 0.0 }
 p.x = 2.0
 ```
@@ -77,7 +80,8 @@ Parameters are immutable unless declared `var self`. To change a value elsewhere
 
 ## Expressions
 ```
-+ - * / %            (Int / Int truncates toward zero)
++ - * / %            (Int `/` truncates toward zero; `%` takes the sign of the left side: -7 % 3 == -1)
+& | ^ << >>          Int only; precedence: * / %  >  + -  >  << >>  >  &  >  ^  >  |  >  comparisons
 == != < <= > >=      and  or  not      a..b  a..=b (ranges)      xs[i]  m[k] (panics if missing)
 if c { a } else { b }                          // an expression; `else` required when used as value
 match shape {
@@ -96,6 +100,8 @@ match shape {
 - `?` on `Result` returns `Err` early; on `Option` returns `None` early (only inside a function returning `Option`; otherwise `.ok_or(err)?`).
 - A `Result` used as a statement must be handled: ignoring one is an error.
 - No `unwrap`: use `?` or `.unwrap_or(default)`. There is no char type: `.chars()` yields one-character `Str`s.
+- A match arm may be an assignment: `None => missing += 1`.
+- `exit(code)` ends the program with that status (0..=255) after flushing output; `main` returning `Err` exits 1, a panic exits 101.
 - `todo` is a typed hole: it type-checks as anything, `drift check` reports it (severity `hole`, not an error) with its expected type and the names in scope, and `drift build` rejects it.
 
 ## Statements
@@ -176,7 +182,11 @@ import shop.offers                 // then: offers.discount(...)
 Every std module is always in scope (`io.println`, `fs.read_str`, `http.get`, `json.encode`); never import it. `pub` exports; everything else is module-private. No import cycles. A project is a directory with `drift.toml`; sources in `src/`, entry `src/main.dr`.
 
 ## Standard library (signatures: `drift outline std.<module>`)
-`io fs net http json str list map set math time rand env proc db (sqlite, postgres) re (regex) html (parse, select) bytes hash (sha256, fnv) log`
+Modules: `core` (Int/Float/Str/Bytes/List/Map/Set/Option/Result methods, always available as methods) `io fs env http json db (sqlite, postgres) re (regex) html (parse, select) bytes hash (sha1, sha256, fnv) time rand`. There are no others.
+- Numbers: `abs min max pow`, Float `sqrt floor ceil round is_nan`, conversions `to_float to_int to_u8 to_i32 ...`. `"42".parse_int()` → `Option[Int]` (accepts a leading `+` or `-`, no spaces or `_`); `parse_float` accepts `1.5e3`. Floats print like Python's `repr` (`1500.0`, `0.30000000000000004`, `1e+16`).
+- Text: `s.len()` counts code points; `s.bytes()` → `Bytes`, and `b[i]` → `Int` (0..=255) with `b.len()` in bytes is the fast way to scan ASCII input. `s.code_points()` → `List[Int]` and `Str.from_code_points(xs)`; `.chars()` → `List[Str]`. `split(sep)`, `split_whitespace()` (Unicode spaces, like Python's `split()`), `lines()`, `trim`, `find`, `replace`, `slice(a, b)` (code-point indices), `repeat`. `is_numeric` / `is_alphabetic` are true for ASCII digits / Unicode letters and false for "".
+- Lists: `List.filled(n, x)`, `push pop insert remove get first last slice take skip reversed sorted sorted_by(key) map filter fold sum min max enumerate zip chunks dedup group_by join`. Priority queue: `pq.heap_push(item)` / `pq.heap_pop()` → `Option` (min-heap by `<`; push tuples `(priority, value)`).
+- Maps (insertion-ordered): `m[k] = v`, `m.insert(k, v)`, `m.get(k)` → `Option`, `m[k]` (panics if missing), `contains_key remove keys values entries len`. Sets: `Set.of(xs)`, `add contains remove to_list union intersection difference is_subset`.
 - `env.args()` starts with the program name: the first argument is `env.args().get(1)`.
 - `json.decode` needs the target type at the call: `let o: Offer = json.decode(text)?` or `json.decode[List[Offer]](text)?`.
 - `env.get("NAME")` → `Option[Str]`.
@@ -191,12 +201,17 @@ Every std module is always in scope (`io.println`, `fs.read_str`, `http.get`, `j
 | command | purpose |
 |---|---|
 | `drift check [--json]` | all diagnostics at once, each with `code`, `span`, `message`, `expected`, `found`, `fix` (machine-applicable edit) |
-| `drift check --fix` | apply every certain fix (syntax, layout, …) in place, then report what is left |
+| `drift check --fix` | apply every certain fix (syntax, layout, …) in place, then report what is left. Layout (F0001) is a warning and never blocks `run`/`build` |
 | `drift run <file\|dir> [args...]` | check, compile through C and run `main`; `args` reach `env.args()` |
 | `drift test [--json] <file\|dir>` | run every `examples` and `test` block, each isolated; a `todo` fails only the test that reaches it |
 | `drift build <file\|dir> [-o out]` | native executable through C (`gcc -O2`; no runtime dependency) |
 | `drift fmt [--check]` | canonical layout (width 100, 2 spaces); comments and single blank lines are kept |
 | `drift outline <module>` | compact signatures, types and effects of a module |
-| `drift explain <code>` | full explanation of a diagnostic |
 | `drift mcp` | MCP server on stdio: `drift_check` (fix), `drift_test`, `drift_run` (stdin, args, timeout), `drift_fmt`, `drift_outline`, `drift_build`, `drift_card`; each takes `path` or `source` |
 | `drift card` | prints this card |
+
+## Performance notes
+- Values are refcounted with copy-on-write: passing and returning lists or maps is O(1); writing `xs[i] = v` or `xs.push(v)` on a list that is also held elsewhere copies it once.
+- Fast: `while` loops over `Int`, `xs[i]` and `xs.len()` on local variables, `for x in xs`, `for i in 0..n`, `b[i]` on `Bytes`, `List.filled`, `heap_push`/`heap_pop`, `sorted` on `List[Int]`.
+- Slow on large inputs: `.chars()` on non-ASCII text (one string per character; prefer `bytes()` or `code_points()`), `xs + [x]` in a loop (copies; use `push`). `main` has a 1 GiB stack: recursion a few million calls deep works, deeper panics with "stack overflow".
+- Roughly: CPU-bound Drift runs about as fast as CPython or somewhat faster, and several times slower than Rust.

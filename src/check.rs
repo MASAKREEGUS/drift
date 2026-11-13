@@ -467,6 +467,8 @@ fn effect_list(bits: u16) -> Vec<&'static str> {
 // ---------------------------------------------------------------- checker
 
 struct Checker<'f> {
+    /// set while checking the integer literal right under a unary minus (`-9223372036854775808` fits)
+    neg_lit: bool,
     files: &'f [SourceFile],
     asts: Vec<Module>,
     mods: Vec<ModInfo>,
@@ -508,6 +510,7 @@ impl<'f> Checker<'f> {
             .map(|(i, f)| ModInfo { path: f.module.clone(), file: i, is_std: f.is_std, names: HashMap::new(), imports: HashMap::new() })
             .collect();
         Checker {
+            neg_lit: false,
             files,
             asts,
             mods,
@@ -1193,6 +1196,40 @@ impl<'f> Checker<'f> {
             _ => None,
         }
     }
+    /// An integer literal must fit its type: no silent wrap-around.
+    fn check_int_lit(&mut self, span: Span, text: &str, t: &Ty, neg: bool) {
+        let c = self.core;
+        let digits: String = text.chars().filter(|ch| *ch != '_').collect();
+        let (d, radix) = if let Some(x) = digits.strip_prefix("0x") {
+            (x.to_string(), 16)
+        } else if let Some(x) = digits.strip_prefix("0b") {
+            (x.to_string(), 2)
+        } else if let Some(x) = digits.strip_prefix("0o") {
+            (x.to_string(), 8)
+        } else {
+            (digits.clone(), 10)
+        };
+        let Some(head) = self.head(t) else { return };
+        let (name, max): (&str, u128) = if head == c.int {
+            ("Int", i64::MAX as u128 + neg as u128)
+        } else if head == c.i32 {
+            ("I32", i32::MAX as u128 + neg as u128)
+        } else if head == c.u8 {
+            ("U8", u8::MAX as u128)
+        } else if head == c.u32 {
+            ("U32", u32::MAX as u128)
+        } else if head == c.u64 {
+            ("U64", u64::MAX as u128)
+        } else {
+            return;
+        };
+        let fits = u128::from_str_radix(&d, radix).map_or(false, |v| v <= max);
+        if !fits && !d.is_empty() {
+            let largest = if neg { format!("smallest: -{}", max) } else { format!("largest: {}", max) };
+            self.emit(Diag::error("E0216", span, format!("integer literal `{}` does not fit in `{}` ({})", text, name, largest)));
+        }
+    }
+
     fn is_int(&self, t: &Ty) -> bool {
         let c = self.core;
         self.head(t).map_or(false, |d| [c.int, c.i32, c.u8, c.u32, c.u64].contains(&d))
@@ -2311,10 +2348,15 @@ impl<'f> Checker<'f> {
     fn expr_inner(&mut self, e: &Expr, exp: Option<&Ty>) -> Ty {
         let c = self.core;
         match &e.kind {
-            ExprKind::Int(_) => match exp {
-                Some(x) if self.is_int(x) => self.resolve(x),
-                _ => self.t_int(),
-            },
+            ExprKind::Int(s) => {
+                let t = match exp {
+                    Some(x) if self.is_int(x) => self.resolve(x),
+                    _ => self.t_int(),
+                };
+                let neg = std::mem::take(&mut self.neg_lit);
+                self.check_int_lit(e.span, s, &t, neg);
+                t
+            }
             ExprKind::Float(_) => match exp {
                 Some(x) if self.head(x) == Some(c.f32) => self.resolve(x),
                 _ => Ty::Named(c.float, vec![]),
@@ -2434,7 +2476,9 @@ impl<'f> Checker<'f> {
                     b
                 }
                 UnOp::Neg => {
+                    self.neg_lit = matches!(expr.kind, ExprKind::Int(_));
                     let t = self.expr(expr, exp);
+                    self.neg_lit = false;
                     let signed = self.head(&t).map_or(false, |d| d == c.int || d == c.i32 || d == c.float || d == c.f32);
                     if !signed && !matches!(self.resolve(&t), Ty::Err | Ty::Var(_)) {
                         let shown = self.show(&t);
@@ -2754,6 +2798,11 @@ impl<'f> Checker<'f> {
             BinOp::Le => "<=",
             BinOp::Gt => ">",
             BinOp::Ge => ">=",
+            BinOp::BitAnd => "&",
+            BinOp::BitOr => "|",
+            BinOp::BitXor => "^",
+            BinOp::Shl => "<<",
+            BinOp::Shr => ">>",
             _ => "",
         };
         match op {
@@ -2762,6 +2811,13 @@ impl<'f> Checker<'f> {
                     self.emit(Diag::error("E0211", e.span, "functions cannot be compared"));
                 }
                 self.t_bool()
+            }
+            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
+                if !(self.head(&rl) == Some(c.int) || matches!(rl, Ty::Var(_))) {
+                    let shown = self.show(&rl);
+                    self.emit(Diag::error("E0211", e.span, format!("`{}` is defined for `Int` only, not `{}`", sym, shown)));
+                }
+                lt
             }
             _ => {
                 let ok = self.is_numeric(&rl)

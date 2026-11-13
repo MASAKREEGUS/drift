@@ -232,7 +232,8 @@ pub fn minimal_edit(old: &str, new: &str) -> Option<Edit> {
 pub fn check_formatted(src: &str) -> Option<Diag> {
     let formatted = format_source(src).ok()?;
     let edit = minimal_edit(src, &formatted)?;
-    let mut d = Diag::error("F0001", edit.span, "file is not in canonical form (run `drift fmt` or apply this fix)");
+    // a warning: layout never stops a program from building or running
+    let mut d = Diag::warning("F0001", edit.span, "layout differs from `drift fmt` (the program still runs; `drift check --fix` rewrites it)");
     d.fix.push(edit);
     Some(d)
 }
@@ -283,6 +284,7 @@ fn prec(e: &Expr) -> u8 {
             BinOp::Or => 1,
             BinOp::And => 2,
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => 4,
+            BinOp::BitOr | BinOp::BitXor | BinOp::BitAnd | BinOp::Shl | BinOp::Shr => 5,
             BinOp::Add | BinOp::Sub => 6,
             BinOp::Mul | BinOp::Div | BinOp::Rem => 7,
         },
@@ -309,6 +311,11 @@ fn binop_str(op: BinOp) -> &'static str {
         BinOp::Mul => "*",
         BinOp::Div => "/",
         BinOp::Rem => "%",
+        BinOp::BitAnd => "&",
+        BinOp::BitOr => "|",
+        BinOp::BitXor => "^",
+        BinOp::Shl => "<<",
+        BinOp::Shr => ">>",
     }
 }
 
@@ -323,7 +330,15 @@ pub fn escape_lit(s: &str, out: &mut String) {
             '\t' => out.push_str("\\t"),
             '\r' => out.push_str("\\r"),
             '\0' => out.push_str("\\0"),
-            c if (c as u32) < 0x20 || c as u32 == 0x7f => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+            // invisible or easily confused characters stay escaped: controls, Unicode spaces other than ' ',
+            // zero-width and direction marks, soft hyphen, BOM
+            c if (c as u32) < 0x20
+                || (0x7f..=0xa0).contains(&(c as u32))
+                || (c.is_whitespace() && c != ' ')
+                || matches!(c as u32, 0xad | 0x034f | 0x061c | 0x115f | 0x1160 | 0x180e | 0x200b..=0x200f | 0x202a..=0x202e | 0x2060..=0x2064 | 0x2066..=0x206f | 0xfeff | 0xfff9..=0xfffb) =>
+            {
+                out.push_str(&format!("\\u{{{:x}}}", c as u32))
+            }
             c => out.push(c),
         }
     }
@@ -848,6 +863,16 @@ impl<'a> Printer<'a> {
             v.push(self.expr(g, false));
         }
         v.push(t(" => "));
+        // `None => count += 1`: a block holding one assignment (and no comment) stays on the arm's line
+        if let ExprKind::Block(b) = &a.body.kind {
+            let has_comment = self.ci < self.comments.len() && self.comments[self.ci].span.lo < b.span.hi;
+            if let [s] = b.stmts.as_slice() {
+                if matches!(s.kind, StmtKind::Assign { .. }) && !has_comment {
+                    v.push(self.stmt(s));
+                    return cat(v);
+                }
+            }
+        }
         v.push(self.body_expr(&a.body));
         cat(v)
     }
