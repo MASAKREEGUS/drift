@@ -52,6 +52,11 @@ pub fn analyze_program(user: &[SourceFile]) -> (Vec<Vec<Diag>>, Option<Program>)
 /// Check and translate to C. `test` builds the test harness (holes allowed: they panic when reached);
 /// otherwise the program entry is the user's `main` and holes are rejected.
 pub fn compile(user: &[SourceFile], test: bool) -> Result<String, Vec<Vec<Diag>>> {
+    compile_for(user, test, false)
+}
+
+/// `compile` with a choice of entry point: `kernel` emits `drift_kmain` for a freestanding kernel.
+pub fn compile_for(user: &[SourceFile], test: bool, kernel: bool) -> Result<String, Vec<Vec<Diag>>> {
     let (mut diags, program) = analyze_program(user);
     // layout (F0001) is reported by `drift check` but never stops a program from running
     let blocking = |d: &Diag| (d.is_error() && d.code != "F0001") || (!test && d.severity == crate::diag::Severity::Hole);
@@ -85,6 +90,9 @@ pub fn compile(user: &[SourceFile], test: bool) -> Result<String, Vec<Vec<Diag>>
         let idx = user.iter().position(|f| f.module == program.mods[m].path).unwrap_or(0);
         diags[idx].push(Diag::error("E0011", crate::diag::Span::new(0, 0), "`main` takes no parameters: read arguments with `env.args()`"));
         return Err(diags);
+    }
+    if kernel {
+        return Ok(crate::codegen::generate(&program, &crate::codegen::Target::Kernel { main }));
     }
     Ok(crate::codegen::generate(&program, &crate::codegen::Target::Run { main }))
 }

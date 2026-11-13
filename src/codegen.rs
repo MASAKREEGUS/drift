@@ -17,6 +17,8 @@ pub enum Target {
     Run { main: usize },
     /// Test harness over every `examples` and `test` block; `todo` panics when reached.
     Test,
+    /// Freestanding kernel: no `main(argc, argv)`, no sandbox; the boot code calls `drift_kmain`.
+    Kernel { main: usize },
 }
 
 #[derive(Clone)]
@@ -177,6 +179,14 @@ pub fn generate(p: &Program, target: &Target) -> String {
                 tests.len()
             ));
         }
+        Target::Kernel { main } => {
+            let info = &p.fns[*main];
+            let is_result = match &p.asts[info.module].items[info.item].kind {
+                ItemKind::Fn(f) => matches!(&f.ret.kind, TypeKind::Named { path, .. } if path.last().map_or(false, |x| x.name == "Result")),
+                _ => false,
+            };
+            main_code.push_str(&format!("int drift_kmain(void) {{\n  d_init_lits();\n  return d_finish_main(f_{}(), {});\n}}\n", main, is_result as i32));
+        }
         Target::Run { main } => {
             let info = &p.fns[*main];
             let is_result = match &p.asts[info.module].items[info.item].kind {
@@ -320,6 +330,19 @@ impl<'p> Gen<'p> {
             return Some(Loc::Env(self.ctxs[depth].captures.len() - 1));
         }
         None
+    }
+    /// Static scalar kind of an expression: 1 Int, 2 Bool, 3 Float, 0 anything else (see `Program::scalars`).
+    fn scalar(&self, e: &Expr) -> u8 {
+        self.p.scalars.get(&(self.module(), e.span.lo, e.span.hi)).copied().unwrap_or(0)
+    }
+    /// Read a variable known to hold a scalar: a plain copy, no reference to count.
+    fn read_scalar(&mut self, l: &Loc) -> String {
+        let code = match l {
+            Loc::Var(c) => c.clone(),
+            Loc::Ptr(c) => format!("*{}", c),
+            Loc::Env(i) => format!("fo->env[{}]", i),
+        };
+        self.tmp(code)
     }
     fn read(&mut self, l: &Loc) -> String {
         let code = match l {
@@ -623,16 +646,28 @@ impl<'p> Gen<'p> {
         match &s.kind {
             StmtKind::Let { pat, value, .. } => {
                 let v = self.expr(value);
+                if let (PatKind::Bind(n), true) = (&pat.kind, self.scalar(value) != 0) {
+                    // a scalar never needs releasing, and this variable only ever holds scalars
+                    let c = self.declare(n);
+                    self.emit(&format!("{c} = {v};"));
+                    return;
+                }
                 self.bind_owned(pat, &v);
             }
             StmtKind::Assign { target, op, value } => {
                 let v = self.expr(value);
                 let p = self.lvalue(target, *op == AssignOp::Set);
+                let int = self.scalar(value) == 1 && self.scalar(target) == 1;
                 let f = match op {
                     AssignOp::Set => {
                         self.emit(&format!("d_release(*{p}); *{p} = {v};"));
                         return;
                     }
+                    AssignOp::Add if int => "d_addi",
+                    AssignOp::Sub if int => "d_subi",
+                    AssignOp::Mul if int => "d_muli",
+                    AssignOp::Div if int => "d_divi",
+                    AssignOp::Rem if int => "d_remi",
                     AssignOp::Add => "d_add",
                     AssignOp::Sub => "d_sub",
                     AssignOp::Mul => "d_mul",
@@ -642,6 +677,26 @@ impl<'p> Gen<'p> {
                 self.emit(&format!("*{p} = {f}(*{p}, {v});"));
             }
             StmtKind::For { pat, iter, body } => {
+                if let (ExprKind::Range { lo, hi, inclusive }, PatKind::Bind(name)) = (&iter.kind, &pat.kind) {
+                    if self.scalar(lo) == 1 && self.scalar(hi) == 1 {
+                        // `for i in a..b` over Ints: a plain counted loop, no range object
+                        let a = self.expr(lo);
+                        let b = self.expr(hi);
+                        let (i, n) = (self.fresh("i"), self.fresh("n"));
+                        self.emit(&format!("int64_t {n} = {b}.i;"));
+                        if *inclusive {
+                            self.emit(&format!("if ({n} == INT64_MAX) d_panic_c(\"integer overflow in `..=`\"); {n}++;"));
+                        }
+                        self.emit(&format!("for (int64_t {i} = {a}.i; {i} < {n}; {i}++) {{"));
+                        self.cur().scopes.push(Vec::new());
+                        let c = self.declare(name);
+                        self.emit(&format!("{c} = d_int({i});"));
+                        self.block(body, false);
+                        self.cur().scopes.pop();
+                        self.emit("}");
+                        return;
+                    }
+                }
                 let it = self.expr(iter);
                 let ic = self.hoist("it");
                 self.emit(&format!("d_release({ic}); {ic} = {it};"));
@@ -693,7 +748,7 @@ impl<'p> Gen<'p> {
             }
             StmtKind::Expr(e) => {
                 let v = self.expr(e);
-                if v != "D_UNIT" {
+                if v != "D_UNIT" && self.scalar(e) == 0 {
                     self.emit(&format!("d_release({});", v));
                 }
             }
@@ -1155,6 +1210,7 @@ impl<'p> Gen<'p> {
             }
             _ => match &e.kind {
                 ExprKind::Name(n) => match self.lookup(n) {
+                    Some(l) if self.scalar(e) != 0 => self.read_scalar(&l),
                     Some(l) => self.read(&l),
                     None => self.internal(&format!("name `{}`", n)),
                 },
@@ -1182,6 +1238,31 @@ impl<'p> Gen<'p> {
         }
         let a = self.expr(lhs);
         let b = self.expr(rhs);
+        let k = self.scalar(lhs);
+        if k != 0 && k == self.scalar(rhs) {
+            // both operands are statically Int, Bool or Float: no kind dispatch, nothing to release
+            let fast = match (k, op) {
+                (1, BinOp::Add) => Some(format!("d_addi({}, {})", a, b)),
+                (1, BinOp::Sub) => Some(format!("d_subi({}, {})", a, b)),
+                (1, BinOp::Mul) => Some(format!("d_muli({}, {})", a, b)),
+                (1, BinOp::Div) => Some(format!("d_divi({}, {})", a, b)),
+                (1, BinOp::Rem) => Some(format!("d_remi({}, {})", a, b)),
+                (1 | 2, BinOp::Eq) => Some(format!("d_bool({}.i == {}.i)", a, b)),
+                (1 | 2, BinOp::Ne) => Some(format!("d_bool({}.i != {}.i)", a, b)),
+                (1, BinOp::Lt) => Some(format!("d_bool({}.i < {}.i)", a, b)),
+                (1, BinOp::Le) => Some(format!("d_bool({}.i <= {}.i)", a, b)),
+                (1, BinOp::Gt) => Some(format!("d_bool({}.i > {}.i)", a, b)),
+                (1, BinOp::Ge) => Some(format!("d_bool({}.i >= {}.i)", a, b)),
+                (3, BinOp::Add) => Some(format!("d_float({}.f + {}.f)", a, b)),
+                (3, BinOp::Sub) => Some(format!("d_float({}.f - {}.f)", a, b)),
+                (3, BinOp::Mul) => Some(format!("d_float({}.f * {}.f)", a, b)),
+                (3, BinOp::Div) => Some(format!("d_float({}.f / {}.f)", a, b)),
+                _ => None,
+            };
+            if let Some(code) = fast {
+                return self.tmp(code);
+            }
+        }
         let f = match op {
             BinOp::Add => "d_add",
             BinOp::Sub => "d_sub",

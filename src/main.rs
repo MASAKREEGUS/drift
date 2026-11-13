@@ -11,6 +11,7 @@ usage:
   drift fmt [--check] <file|dir>...            rewrite files in canonical form; --check only lists them
   drift run <file|dir> [args...]               check, compile through C and run `main`
   drift build <file|dir> [-o out]              native executable (gcc -O2)
+  drift build --kernel <file|dir> -o <dir>     freestanding C for a kernel: <dir>/kernel.c, drift_rt.c, drift_rt.h (entry `drift_kmain`)
   drift test [--json] <file|dir>...            run every `examples` and `test` block, each in its own process
   drift outline <std.module|file>              signatures and types of a module
   drift parse <file> [--ast]                   parse one file; --ast prints the tree
@@ -167,6 +168,9 @@ fn build_cmd(args: &[String]) -> ExitCode {
         eprintln!("{}", USAGE);
         return ExitCode::from(2);
     };
+    if args.iter().any(|a| a == "--kernel") {
+        return kernel_cmd(&path, out.as_deref().unwrap_or("."));
+    }
     let exe = match build_exe(&path, false, "-O2") {
         Ok(e) => e,
         Err(c) => return c,
@@ -179,6 +183,36 @@ fn build_cmd(args: &[String]) -> ExitCode {
         return ExitCode::from(2);
     }
     eprintln!("built {}", out);
+    ExitCode::SUCCESS
+}
+
+/// Emit the generated C and the runtime sources for a freestanding kernel build.
+fn kernel_cmd(path: &str, dir: &str) -> ExitCode {
+    let files = match inputs(&[path.to_string()]).and_then(|ins| load(&ins)) {
+        Ok(f) => f,
+        Err(c) => return c,
+    };
+    let c = match drift::driver::compile_for(&files, false, true) {
+        Ok(c) => c,
+        Err(diags) => {
+            let (errors, holes) = report(&files, &diags, false);
+            eprintln!("drift: {} error(s), {} hole(s); nothing was built", errors, holes);
+            return ExitCode::from(1);
+        }
+    };
+    let dir = Path::new(dir);
+    let outs = [("kernel.c", c.as_str()), ("drift_rt.c", drift::codegen::RT_C), ("drift_rt.h", drift::codegen::RT_H)];
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        eprintln!("drift: cannot create {}: {}", dir.display(), e);
+        return ExitCode::from(2);
+    }
+    for (name, text) in outs {
+        if let Err(e) = std::fs::write(dir.join(name), text) {
+            eprintln!("drift: cannot write {}: {}", dir.join(name).display(), e);
+            return ExitCode::from(2);
+        }
+    }
+    eprintln!("built {}/kernel.c (entry `drift_kmain`)", dir.display());
     ExitCode::SUCCESS
 }
 

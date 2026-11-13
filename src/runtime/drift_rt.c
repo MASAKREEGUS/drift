@@ -1752,6 +1752,42 @@ V d_n_time_sleep_ms(V ms) {
   if (ms.i > 0) { struct timespec ts = {ms.i / 1000, (ms.i % 1000) * 1000000}; d_block_enter(); nanosleep(&ts, NULL); d_block_exit(); }
   return D_UNIT;
 }
+
+/* std.hw: bare-metal hardware access. A kernel (drift build --kernel) links its own strong definitions;
+   these weak ones make a hosted program panic. */
+#define D_HW_ONLY d_panic_c("std.hw works only in a kernel built with `drift build --kernel`")
+__attribute__((weak))
+V d_n_hw_outb(V port, V value) { D_HW_ONLY; }
+__attribute__((weak))
+V d_n_hw_inb(V port) { D_HW_ONLY; }
+__attribute__((weak))
+V d_n_hw_peek8(V addr) { D_HW_ONLY; }
+__attribute__((weak))
+V d_n_hw_peek16(V addr) { D_HW_ONLY; }
+__attribute__((weak))
+V d_n_hw_peek32(V addr) { D_HW_ONLY; }
+__attribute__((weak))
+V d_n_hw_peek64(V addr) { D_HW_ONLY; }
+__attribute__((weak))
+V d_n_hw_poke8(V addr, V value) { D_HW_ONLY; }
+__attribute__((weak))
+V d_n_hw_poke16(V addr, V value) { D_HW_ONLY; }
+__attribute__((weak))
+V d_n_hw_poke32(V addr, V value) { D_HW_ONLY; }
+__attribute__((weak))
+V d_n_hw_poke64(V addr, V value) { D_HW_ONLY; }
+__attribute__((weak))
+V d_n_hw_halt(void) { D_HW_ONLY; }
+__attribute__((weak))
+V d_n_hw_rdtsc(void) { D_HW_ONLY; }
+__attribute__((weak))
+V d_n_hw_ticks(void) { D_HW_ONLY; }
+__attribute__((weak))
+V d_n_hw_key(void) { D_HW_ONLY; }
+__attribute__((weak))
+V d_n_hw_heap_used(void) { D_HW_ONLY; }
+__attribute__((weak))
+V d_n_hw_heap_total(void) { D_HW_ONLY; }
 static _Thread_local uint64_t rng_state;
 static uint64_t rng(void) {
   if (!rng_state) {
@@ -4520,7 +4556,7 @@ V d_n_html_Node_parent(V n) {
 #else
 #define D_SANITIZED 0
 #endif
-enum { EF_IO = 1, EF_FS = 2, EF_NET = 4, EF_DB = 8, EF_ENV = 16, EF_TIME = 32, EF_RAND = 64, EF_PROC = 128, EF_SPAWN = 256 };
+enum { EF_IO = 1, EF_FS = 2, EF_NET = 4, EF_DB = 8, EF_ENV = 16, EF_TIME = 32, EF_RAND = 64, EF_PROC = 128, EF_SPAWN = 256, EF_HW = 512 };
 
 #ifndef SYS_landlock_create_ruleset
 #define SYS_landlock_create_ruleset 444

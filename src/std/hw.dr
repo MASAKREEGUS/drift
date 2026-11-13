@@ -1,0 +1,24 @@
+/// Bare-metal hardware access for kernels built with `drift build --kernel`. A hosted program panics.
+/// Read or write a byte on an x86 I/O port.
+pub fn outb(port: Int, value: Int) -> () uses hw { todo }
+pub fn inb(port: Int) -> Int uses hw { todo }
+/// Read or write physical memory: 8, 16, 32 or 64 bits at `addr`.
+pub fn peek8(addr: Int) -> Int uses hw { todo }
+pub fn peek16(addr: Int) -> Int uses hw { todo }
+pub fn peek32(addr: Int) -> Int uses hw { todo }
+pub fn peek64(addr: Int) -> Int uses hw { todo }
+pub fn poke8(addr: Int, value: Int) -> () uses hw { todo }
+pub fn poke16(addr: Int, value: Int) -> () uses hw { todo }
+pub fn poke32(addr: Int, value: Int) -> () uses hw { todo }
+pub fn poke64(addr: Int, value: Int) -> () uses hw { todo }
+/// Stop the CPU until the next interrupt.
+pub fn halt() -> () uses hw { todo }
+/// CPU cycle counter.
+pub fn rdtsc() -> Int uses hw { todo }
+/// Timer interrupts since boot (100 per second).
+pub fn ticks() -> Int uses hw { todo }
+/// Next key scancode from the keyboard interrupt queue, if any.
+pub fn key() -> Option[Int] uses hw { todo }
+/// Kernel heap: bytes in use and total bytes.
+pub fn heap_used() -> Int uses hw { todo }
+pub fn heap_total() -> Int uses hw { todo }

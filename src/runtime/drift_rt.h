@@ -116,6 +116,20 @@ static inline V d_rem(V a, V b) {
   }
   return d_float(fmod(a.f, b.f));
 }
+/* Operands statically known to be Int (the checker's scalar table): no kind dispatch. */
+static inline V d_addi(V a, V b) { int64_t r; if (__builtin_add_overflow(a.i, b.i, &r)) d_panic_c("integer overflow in `+`"); return d_int(r); }
+static inline V d_subi(V a, V b) { int64_t r; if (__builtin_sub_overflow(a.i, b.i, &r)) d_panic_c("integer overflow in `-`"); return d_int(r); }
+static inline V d_muli(V a, V b) { int64_t r; if (__builtin_mul_overflow(a.i, b.i, &r)) d_panic_c("integer overflow in `*`"); return d_int(r); }
+static inline V d_divi(V a, V b) {
+  if (b.i == 0) d_panic_c("division by zero");
+  if (b.i == -1 && a.i == INT64_MIN) d_panic_c("integer overflow in `/`");
+  return d_int(a.i / b.i);
+}
+static inline V d_remi(V a, V b) {
+  if (b.i == 0) d_panic_c("division by zero in `%`");
+  if (b.i == -1) return d_int(0);
+  return d_int(a.i % b.i);
+}
 static inline V d_band(V a, V b) { return d_int(a.i & b.i); }
 static inline V d_bor(V a, V b) { return d_int(a.i | b.i); }
 static inline V d_bxor(V a, V b) { return d_int(a.i ^ b.i); }

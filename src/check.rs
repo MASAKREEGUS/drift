@@ -19,9 +19,10 @@ pub const STD_MODULES: &[(&str, &str)] = &[
     ("hash", include_str!("std/hash.dr")),
     ("time", include_str!("std/time.dr")),
     ("rand", include_str!("std/rand.dr")),
+    ("hw", include_str!("std/hw.dr")),
 ];
 
-pub const EFFECTS: [&str; 9] = ["io", "fs", "net", "db", "env", "time", "rand", "proc", "spawn"];
+pub const EFFECTS: [&str; 10] = ["io", "fs", "net", "db", "env", "time", "rand", "proc", "spawn", "hw"];
 
 pub struct SourceFile {
     pub name: String,
@@ -78,6 +79,9 @@ pub struct Program {
     pub(crate) fns: Vec<FnInfo>,
     pub(crate) consts: Vec<ConstInfo>,
     pub(crate) notes: HashMap<NoteKey, Note>,
+    /// Expressions whose static type is a plain scalar: (module, span.lo, span.hi) -> 1 Int, 2 Bool, 3 Float.
+    /// 0 marks a span seen with conflicting types. The back end uses it to skip reference counting and kind dispatch.
+    pub(crate) scalars: HashMap<(usize, u32, u32), u8>,
     pub(crate) core: Core,
 }
 
@@ -95,6 +99,7 @@ pub fn check_program(files: &[SourceFile], asts: Vec<Module>) -> (Vec<(usize, Di
         fns: std::mem::take(&mut c.fns),
         consts: std::mem::take(&mut c.consts),
         notes: std::mem::take(&mut c.notes),
+        scalars: std::mem::take(&mut c.scalars),
         core: c.core,
     };
     (out, prog)
@@ -500,6 +505,8 @@ struct Checker<'f> {
     /// (span, type, kind): b'j' json.decode target, b'r' SQL row type, b'p' SQL parameters (checked only).
     reified: Vec<(Span, Ty, u8)>,
     notes: HashMap<NoteKey, Note>,
+    etys: Vec<(Span, Ty)>,
+    scalars: HashMap<(usize, u32, u32), u8>,
 }
 
 impl<'f> Checker<'f> {
@@ -540,6 +547,8 @@ impl<'f> Checker<'f> {
             infer_lets: Vec::new(),
             reified: Vec::new(),
             notes: HashMap::new(),
+            etys: Vec::new(),
+            scalars: HashMap::new(),
         }
     }
 
@@ -1343,6 +1352,7 @@ impl<'f> Checker<'f> {
 
     fn begin_body(&mut self, effects: u16, insert: Option<(u32, bool)>, owner: String) {
         self.vars.clear();
+        self.etys.clear();
         self.locals.clear();
         self.scopes.clear();
         self.rets.clear();
@@ -1360,6 +1370,18 @@ impl<'f> Checker<'f> {
 
     fn end_body(&mut self) {
         self.pop_scope();
+        for (span, ty) in std::mem::take(&mut self.etys) {
+            let k = match self.zonk(&ty) {
+                Ty::Named(d, _) if d == self.core.int => 1,
+                Ty::Named(d, _) if d == self.core.bool => 2,
+                Ty::Named(d, _) if d == self.core.float => 3,
+                _ => 0,
+            };
+            let slot = self.scalars.entry((self.cur, span.lo, span.hi)).or_insert(k);
+            if *slot != k {
+                *slot = 0;
+            }
+        }
         for (span, ty, scope) in std::mem::take(&mut self.holes) {
             let ts = self.show(&self.zonk(&ty));
             let mut d = Diag::error("H0001", span, format!("hole: expected `{}`", ts)).expected(ts);
@@ -2129,7 +2151,7 @@ impl<'f> Checker<'f> {
 
     fn expr(&mut self, e: &Expr, exp: Option<&Ty>) -> Ty {
         let t = self.expr_inner(e, exp);
-        match exp {
+        let t = match exp {
             None => t,
             Some(x) => {
                 if self.unify(&t, x) {
@@ -2139,7 +2161,9 @@ impl<'f> Checker<'f> {
                     x.clone()
                 }
             }
-        }
+        };
+        self.etys.push((e.span, t.clone()));
+        t
     }
 
     fn mismatch(&mut self, e: &Expr, found: &Ty, expected: &Ty) {

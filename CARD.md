@@ -122,7 +122,7 @@ pub fn main() -> Result[(), Error] uses io, net {
   Ok(())
 }
 ```
-- Effects: `io` (stdin/stdout/stderr), `fs`, `net`, `db`, `env`, `time`, `rand`, `proc`, `spawn`.
+- Effects: `io` (stdin/stdout/stderr), `fs`, `net`, `db`, `env`, `time`, `rand`, `proc`, `spawn`, `hw` (bare-metal hardware, kernels only).
 - A function may call another only if the callee's effects are a subset of its own. Closures inherit the effects of what they call.
 - `main` declares what the program may do and the kernel enforces it (Landlock + seccomp): without `fs` no file can be opened, without `net` no socket, without `proc` no exec or fork. Each `test` block runs sandboxed with its own `uses`; `examples` get nothing. `DRIFT_SANDBOX=off` disables it, `DRIFT_SANDBOX_REPORT=1` shows what is enforced.
 
@@ -182,7 +182,7 @@ import shop.offers                 // then: offers.discount(...)
 Every std module is always in scope (`io.println`, `fs.read_str`, `http.get`, `json.encode`); never import it. `pub` exports; everything else is module-private. No import cycles. A project is a directory with `drift.toml`; sources in `src/`, entry `src/main.dr`.
 
 ## Standard library (signatures: `drift outline std.<module>`)
-Modules: `core` (Int/Float/Str/Bytes/List/Map/Set/Option/Result methods, always available as methods) `io fs env http json db (sqlite, postgres) re (regex) html (parse, select) bytes hash (sha1, sha256, fnv) time rand`. There are no others.
+Modules: `core` (Int/Float/Str/Bytes/List/Map/Set/Option/Result methods, always available as methods) `io fs env http json db (sqlite, postgres) re (regex) html (parse, select) bytes hash (sha1, sha256, fnv) time rand hw`. There are no others.
 - Numbers: `abs min max pow`, Float `sqrt floor ceil round is_nan`, conversions `to_float to_int to_u8 to_i32 ...`. `"42".parse_int()` → `Option[Int]` (accepts a leading `+` or `-`, no spaces or `_`); `parse_float` accepts `1.5e3`. Floats print like Python's `repr` (`1500.0`, `0.30000000000000004`, `1e+16`).
 - Text: `s.len()` counts code points; `s.bytes()` → `Bytes`, and `b[i]` → `Int` (0..=255) with `b.len()` in bytes is the fast way to scan ASCII input. `s.code_points()` → `List[Int]` and `Str.from_code_points(xs)`; `.chars()` → `List[Str]`. `split(sep)`, `split_whitespace()` (Unicode spaces, like Python's `split()`), `lines()`, `trim`, `find`, `replace`, `slice(a, b)` (code-point indices), `repeat`. Predicates (true when every character matches; false for ""): `is_alphabetic` Unicode letters (L*), `is_alphanumeric` Unicode letters or numbers (L*, Nd, Nl, No; same as Python's `isalnum`), `is_whitespace` Unicode spaces, `is_numeric` ASCII `0`-`9` only (unlike Python). Per character: `for c in s.chars() { if c.is_alphanumeric() { ... } }`.
 - Lists: `List.filled(n, x)`, `push pop insert remove get first last slice take skip reversed sorted sorted_by(key) map filter fold sum min max enumerate zip chunks dedup group_by join`. Priority queue: `pq.heap_push(item)` / `pq.heap_pop()` → `Option` (min-heap by `<`; push tuples `(priority, value)`).
@@ -195,6 +195,7 @@ Modules: `core` (Int/Float/Str/Bytes/List/Map/Set/Option/Result methods, always 
 - `db.open(":memory:" | "file.db" | "postgres://user@host/db")?`, then `c.exec(sql, params)?` (rows changed), `c.query[Row](sql, params)?` → `List[Row]`, `c.query_one[Row](sql, params)?` → `Option[Row]` (`Err` if several), `c.exec_script(sql)?` for several statements. Placeholders are `$1, $2` on both backends; `params` is `()`, one value or a tuple `(id, name)`. `Row` is a struct (fields matched to columns by name), a tuple (by position) or one value; columns are Int/Float/Bool/Str/Bytes, NULL needs `Option`. `e.code` is the SQLSTATE on both backends (`"23505"` unique violation).
 - `http.get`/`http.post` follow redirects and return `Err` (with `.status`) for status >= 400; `http.request(method, url, headers, body)` returns any status. `.text()` honors the response charset.
 - `re.compile(r"(\d+)-(\d+)")?` then `.find`, `.find_all`, `.is_match`, `.replace_all(text, "$2/$1")`, `.split`; `Match` has `text`, `start`, `end` (character indices) and `groups: List[Option[Str]]`. Linear time; no backreferences or lookaround.
+- `hw` (kernels only; a hosted program panics): `hw.outb(port, v)`, `hw.inb(port)`, `hw.peek8/16/32/64(addr)`, `hw.poke8/16/32/64(addr, v)`, `hw.halt()` (wait for an interrupt), `hw.ticks()` (timer, 100 per second), `hw.key()` → `Option[Int]` keyboard scancode, `hw.rdtsc()`, `hw.heap_used()`, `hw.heap_total()`. There is no global state: keep kernel state in hardware or in a `var` owned by `main`.
 - `html.parse(src).select("ul#list > li.item:not(.agotado)")` → `List[html.Node]`; a node has `.text()` (whitespace collapsed), `.attr("href")`, `.attrs()`, `.tag()`, `.html()`, `.inner_html()`, `.children()`, `.parent()`, `.select(css)`, `.select_first(css)`.
 
 ## Toolchain — single binary `drift`
@@ -205,6 +206,7 @@ Modules: `core` (Int/Float/Str/Bytes/List/Map/Set/Option/Result methods, always 
 | `drift run <file\|dir> [args...]` | check, compile through C and run `main`; `args` reach `env.args()` |
 | `drift test [--json] <file\|dir>` | run every `examples` and `test` block, each isolated; a `todo` fails only the test that reaches it |
 | `drift build <file\|dir> [-o out]` | native executable through C (`gcc -O2`; no runtime dependency) |
+| `drift build --kernel <dir> -o <out>` | freestanding C for an OS kernel: `kernel.c` + runtime, entry `drift_kmain`; `main` needs only `uses hw` |
 | `drift fmt [--check]` | canonical layout (width 100, 2 spaces); comments and single blank lines are kept |
 | `drift outline <module>` | compact signatures, types and effects of a module |
 | `drift mcp` | MCP server on stdio: `drift_check` (fix), `drift_test`, `drift_run` (stdin, args, timeout), `drift_fmt`, `drift_outline`, `drift_build`, `drift_card`; each takes `path` or `source` |
