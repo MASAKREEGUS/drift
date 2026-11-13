@@ -1,0 +1,177 @@
+{
+ "t01/18-perf-1e6/drift": {
+  "cpu": 1.13,
+  "rss_kb": 209236,
+  "ok": true
+ },
+ "t01/18-perf-1e6/python": {
+  "cpu": 1.49,
+  "rss_kb": 120596,
+  "ok": true
+ },
+ "t01/18-perf-1e6/rust": {
+  "cpu": 0.09,
+  "rss_kb": 20164,
+  "ok": true
+ },
+ "t03/16-perf-text/python": {
+  "cpu": 0.6000000000000001,
+  "rss_kb": 38488,
+  "ok": true
+ },
+ "t03/16-perf-text/rust": {
+  "cpu": 0.2,
+  "rss_kb": 6556,
+  "ok": true
+ },
+ "t05/22-perf-big/drift": {
+  "cpu": 1.2100000000000002,
+  "rss_kb": 179748,
+  "ok": true
+ },
+ "t05/22-perf-big/python": {
+  "cpu": 1.0899999999999999,
+  "rss_kb": 100140,
+  "ok": true
+ },
+ "t05/22-perf-big/rust": {
+  "cpu": 0.09,
+  "rss_kb": 7244,
+  "ok": true
+ },
+ "t06/10-perf-lines/drift": {
+  "cpu": 0.67,
+  "rss_kb": 22588,
+  "ok": true
+ },
+ "t06/10-perf-lines/python": {
+  "cpu": 1.54,
+  "rss_kb": 30432,
+  "ok": true
+ },
+ "t06/10-perf-lines/rust": {
+  "cpu": 0.16,
+  "rss_kb": 7576,
+  "ok": true
+ },
+ "t10/10-perf-long-path/drift": {
+  "cpu": 0.8700000000000001,
+  "rss_kb": 70912,
+  "ok": true
+ },
+ "t10/11-perf-random/drift": {
+  "cpu": 1.9200000000000002,
+  "rss_kb": 122932,
+  "ok": true
+ },
+ "t10/10-perf-long-path/python": {
+  "cpu": 1.1500000000000001,
+  "rss_kb": 93444,
+  "ok": true
+ },
+ "t10/11-perf-random/python": {
+  "cpu": 2.61,
+  "rss_kb": 300160,
+  "ok": true
+ },
+ "t10/10-perf-long-path/rust": {
+  "cpu": 0.12,
+  "rss_kb": 14040,
+  "ok": true
+ },
+ "t10/11-perf-random/rust": {
+  "cpu": 0.25,
+  "rss_kb": 57288,
+  "ok": true
+ },
+ "t12/13-perf-dag/drift": {
+  "cpu": 1.1600000000000001,
+  "rss_kb": 115184,
+  "ok": true
+ },
+ "t12/14-perf-long-cycle/drift": {
+  "cpu": 1.27,
+  "rss_kb": 130144,
+  "ok": true
+ },
+ "t12/13-perf-dag/python": {
+  "cpu": 1.4100000000000001,
+  "rss_kb": 105304,
+  "ok": true
+ },
+ "t12/14-perf-long-cycle/python": {
+  "cpu": 1.34,
+  "rss_kb": 101860,
+  "ok": true
+ },
+ "t12/13-perf-dag/rust": {
+  "cpu": 0.33999999999999997,
+  "rss_kb": 29440,
+  "ok": true
+ },
+ "t12/14-perf-long-cycle/rust": {
+  "cpu": 0.35000000000000003,
+  "rss_kb": 34852,
+  "ok": true
+ },
+ "t13/10-perf-anti-brute/drift": {
+  "cpu": 0,
+  "rss_kb": 2796,
+  "ok": true
+ },
+ "t13/11-perf-many/drift": {
+  "cpu": 0.12,
+  "rss_kb": 2784,
+  "ok": true
+ },
+ "t13/10-perf-anti-brute/python": {
+  "cpu": 0.02,
+  "rss_kb": 10656,
+  "ok": true
+ },
+ "t13/11-perf-many/python": {
+  "cpu": 0.11,
+  "rss_kb": 10660,
+  "ok": true
+ },
+ "t13/10-perf-anti-brute/rust": {
+  "cpu": 0,
+  "rss_kb": 2412,
+  "ok": true
+ },
+ "t13/11-perf-many/rust": {
+  "cpu": 0,
+  "rss_kb": 2400,
+  "ok": true
+ },
+ "t25/09-perf-50m/drift": {
+  "cpu": 0.02,
+  "rss_kb": 2800,
+  "ok": true
+ },
+ "t25/10-perf-100m/drift": {
+  "cpu": 0.03,
+  "rss_kb": 2880,
+  "ok": true
+ },
+ "t25/09-perf-50m/python": {
+  "cpu": 0.25,
+  "rss_kb": 11360,
+  "ok": true
+ },
+ "t25/10-perf-100m/python": {
+  "cpu": 0.49,
+  "rss_kb": 11444,
+  "ok": true
+ },
+ "t25/09-perf-50m/rust": {
+  "cpu": 0.04,
+  "rss_kb": 2428,
+  "ok": true
+ },
+ "t25/10-perf-100m/rust": {
+  "cpu": 0.1,
+  "rss_kb": 2420,
+  "ok": true
+ }
+}

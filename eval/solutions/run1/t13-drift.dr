@@ -1,0 +1,260 @@
+struct S {
+  c: List[Int]
+  peers: List[List[Int]]
+  units: List[List[List[Int]]]
+  all: List[List[Int]]
+  pc: List[Int]
+  bit: List[Int]
+}
+
+fn low(self: S, m: Int) -> Int {
+  var d = 0
+  while m / self.bit[d] % 2 == 0 {
+    d += 1
+  }
+  d
+}
+
+fn elim(var self: S, s: Int, d: Int) -> Bool {
+  let m = self.c[s]
+  let b = self.bit[d]
+  if m / b % 2 == 0 {
+    return true
+  }
+  let nm = m - b
+  self.c[s] = nm
+  let n = self.pc[nm]
+  if n == 0 {
+    return false
+  }
+  if n == 1 {
+    let d2 = self.low(nm)
+    for p in self.peers[s] {
+      if not self.elim(p, d2) {
+        return false
+      }
+    }
+  }
+  for u in self.units[s] {
+    var cnt = 0
+    var place = -1
+    for q in u {
+      if self.c[q] / b % 2 == 1 {
+        cnt += 1
+        place = q
+      }
+    }
+    if cnt == 0 {
+      return false
+    }
+    if cnt == 1 {
+      if not self.assign(place, d) {
+        return false
+      }
+    }
+  }
+  true
+}
+
+fn assign(var self: S, s: Int, d: Int) -> Bool {
+  let m = self.c[s]
+  for d2 in 0..9 {
+    if d2 != d and m / self.bit[d2] % 2 == 1 {
+      if not self.elim(s, d2) {
+        return false
+      }
+    }
+  }
+  true
+}
+
+fn search(st: S) -> Option[List[Int]] {
+  var best = -1
+  var bc = 10
+  for i in 0..81 {
+    let n = st.pc[st.c[i]]
+    if n > 1 and n < bc {
+      bc = n
+      best = i
+    }
+  }
+  if best < 0 {
+    return Some(st.c)
+  }
+  var bu = -1
+  var bd = -1
+  if bc > 2 {
+    for (ui, u) in st.all.enumerate() {
+      for d in 0..9 {
+        let b = st.bit[d]
+        var cnt = 0
+        for q in u {
+          let m = st.c[q]
+          if m / b % 2 == 1 {
+            if st.pc[m] == 1 {
+              cnt = 100
+            } else {
+              cnt += 1
+            }
+          }
+        }
+        if cnt < bc {
+          bc = cnt
+          bu = ui
+          bd = d
+        }
+      }
+    }
+  }
+  if bu >= 0 {
+    for q in st.all[bu] {
+      if st.c[q] / st.bit[bd] % 2 == 1 {
+        var t = st
+        if t.assign(q, bd) {
+          match search(t) {
+            Some(r) => return Some(r)
+            None => {}
+          }
+        }
+      }
+    }
+    return None
+  }
+  let m = st.c[best]
+  for d in 0..9 {
+    if m / st.bit[d] % 2 == 1 {
+      var t = st
+      if t.assign(best, d) {
+        match search(t) {
+          Some(r) => return Some(r)
+          None => {}
+        }
+      }
+    }
+  }
+  None
+}
+
+fn make_state() -> S {
+  var units: List[List[Int]] = []
+  for r in 0..9 {
+    var u: List[Int] = []
+    for k in 0..9 {
+      u.push(r * 9 + k)
+    }
+    units.push(u)
+  }
+  for col in 0..9 {
+    var u: List[Int] = []
+    for k in 0..9 {
+      u.push(k * 9 + col)
+    }
+    units.push(u)
+  }
+  for b in 0..9 {
+    var u: List[Int] = []
+    let r0 = b / 3 * 3
+    let c0 = b % 3 * 3
+    for k in 0..9 {
+      u.push((r0 + k / 3) * 9 + c0 + k % 3)
+    }
+    units.push(u)
+  }
+  var cu: List[List[List[Int]]] = []
+  var peers: List[List[Int]] = []
+  for s in 0..81 {
+    let r = s / 9
+    let col = s % 9
+    let b = r / 3 * 3 + col / 3
+    let us = [units[r], units[9 + col], units[18 + b]]
+    cu.push(us)
+    var ps: List[Int] = []
+    for u in us {
+      for q in u {
+        if q != s and not ps.contains(q) {
+          ps.push(q)
+        }
+      }
+    }
+    peers.push(ps)
+  }
+  var pc: List[Int] = []
+  for m in 0..512 {
+    var x = m
+    var n = 0
+    while x > 0 {
+      n += x % 2
+      x = x / 2
+    }
+    pc.push(n)
+  }
+  var bit: List[Int] = []
+  var v = 1
+  for _ in 0..10 {
+    bit.push(v)
+    v = v * 2
+  }
+  var c: List[Int] = []
+  for _ in 0..81 {
+    c.push(511)
+  }
+  S { c, peers, units: cu, all: units, pc, bit }
+}
+
+fn solve_line(base: S, line: Str) -> Str {
+  let cs = line.chars()
+  if cs.len() != 81 {
+    return "invalid"
+  }
+  var givens: List[Int] = []
+  for ch in cs {
+    if ch == "." or ch == "0" {
+      givens.push(-1)
+    } else {
+      match "123456789".find(ch) {
+        Some(v) => givens.push(v)
+        None => return "invalid"
+      }
+    }
+  }
+  var st = base
+  for i in 0..81 {
+    let g = givens[i]
+    if g >= 0 {
+      if st.c[i] / st.bit[g] % 2 == 0 {
+        return "no solution"
+      }
+      if not st.assign(i, g) {
+        return "no solution"
+      }
+    }
+  }
+  match search(st) {
+    Some(res) => {
+      var out: List[Str] = []
+      for i in 0..81 {
+        out.push("{st.low(res[i]) + 1}")
+      }
+      out.join("")
+    }
+    None => "no solution"
+  }
+}
+
+pub fn main() -> Result[(), Error] uses io {
+  let base = make_state()
+  let text = io.read_all()
+  var out: List[Str] = []
+  for raw in text.lines() {
+    let line = if raw.ends_with("\r") {
+      raw.slice(0, raw.len() - 1)
+    } else {
+      raw
+    }
+    out.push(solve_line(base, line))
+  }
+  if not out.is_empty() {
+    io.println(out.join("\n"))
+  }
+  Ok(())
+}

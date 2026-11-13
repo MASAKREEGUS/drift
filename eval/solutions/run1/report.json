@@ -1,0 +1,170 @@
+{
+ "t01-drift": {
+  "attempts": 1,
+  "pass1": true,
+  "pass3": true,
+  "first": "18/18",
+  "loc": 74
+ },
+ "t01-python": {
+  "attempts": 1,
+  "pass1": true,
+  "pass3": true,
+  "first": "18/18",
+  "loc": 44
+ },
+ "t01-rust": {
+  "attempts": 1,
+  "pass1": true,
+  "pass3": true,
+  "first": "18/18",
+  "loc": 73
+ },
+ "t03-drift": {
+  "attempts": 1,
+  "pass1": false,
+  "pass3": false,
+  "first": "12/16",
+  "loc": 65
+ },
+ "t03-python": {
+  "attempts": 1,
+  "pass1": true,
+  "pass3": true,
+  "first": "16/16",
+  "loc": 85
+ },
+ "t03-rust": {
+  "attempts": 1,
+  "pass1": true,
+  "pass3": true,
+  "first": "16/16",
+  "loc": 2499
+ },
+ "t05-drift": {
+  "attempts": 1,
+  "pass1": true,
+  "pass3": true,
+  "first": "22/22",
+  "loc": 90
+ },
+ "t05-python": {
+  "attempts": 1,
+  "pass1": true,
+  "pass3": true,
+  "first": "22/22",
+  "loc": 66
+ },
+ "t05-rust": {
+  "attempts": 1,
+  "pass1": true,
+  "pass3": true,
+  "first": "22/22",
+  "loc": 151
+ },
+ "t06-drift": {
+  "attempts": 1,
+  "pass1": true,
+  "pass3": true,
+  "first": "10/10",
+  "loc": 183
+ },
+ "t06-python": {
+  "attempts": 1,
+  "pass1": true,
+  "pass3": true,
+  "first": "10/10",
+  "loc": 95
+ },
+ "t06-rust": {
+  "attempts": 1,
+  "pass1": true,
+  "pass3": true,
+  "first": "10/10",
+  "loc": 146
+ },
+ "t10-drift": {
+  "attempts": 1,
+  "pass1": true,
+  "pass3": true,
+  "first": "11/11",
+  "loc": 157
+ },
+ "t10-python": {
+  "attempts": 1,
+  "pass1": true,
+  "pass3": true,
+  "first": "11/11",
+  "loc": 61
+ },
+ "t10-rust": {
+  "attempts": 1,
+  "pass1": true,
+  "pass3": true,
+  "first": "11/11",
+  "loc": 81
+ },
+ "t12-drift": {
+  "attempts": 1,
+  "pass1": true,
+  "pass3": true,
+  "first": "14/14",
+  "loc": 198
+ },
+ "t12-python": {
+  "attempts": 1,
+  "pass1": true,
+  "pass3": true,
+  "first": "14/14",
+  "loc": 71
+ },
+ "t12-rust": {
+  "attempts": 1,
+  "pass1": true,
+  "pass3": true,
+  "first": "14/14",
+  "loc": 136
+ },
+ "t13-drift": {
+  "attempts": 1,
+  "pass1": true,
+  "pass3": true,
+  "first": "11/11",
+  "loc": 260
+ },
+ "t13-python": {
+  "attempts": 1,
+  "pass1": true,
+  "pass3": true,
+  "first": "11/11",
+  "loc": 146
+ },
+ "t13-rust": {
+  "attempts": 1,
+  "pass1": true,
+  "pass3": true,
+  "first": "11/11",
+  "loc": 133
+ },
+ "t25-drift": {
+  "attempts": 1,
+  "pass1": true,
+  "pass3": true,
+  "first": "10/10",
+  "loc": 68
+ },
+ "t25-python": {
+  "attempts": 1,
+  "pass1": true,
+  "pass3": true,
+  "first": "10/10",
+  "loc": 61
+ },
+ "t25-rust": {
+  "attempts": 1,
+  "pass1": true,
+  "pass3": true,
+  "first": "10/10",
+  "loc": 67
+ }
+}

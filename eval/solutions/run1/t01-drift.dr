@@ -1,0 +1,74 @@
+fn fmt_mean(sum: Int, n: Int) -> Str {
+  let neg = sum < 0
+  let a = sum.abs()
+  let q = (a * 200 + n) / (2 * n)
+  let ip = q / 100
+  let fp = q % 100
+  let fs = if fp < 10 {
+    "0{fp}"
+  } else {
+    "{fp}"
+  }
+  let sign = if neg and q > 0 {
+    "-"
+  } else {
+    ""
+  }
+  "{sign}{ip}.{fs}"
+}
+
+fn fmt_median(sorted: List[Int]) -> Str {
+  let n = sorted.len()
+  if n % 2 == 1 {
+    return "{sorted[n / 2]}"
+  }
+  let s = sorted[n / 2 - 1] + sorted[n / 2]
+  if s % 2 == 0 {
+    return "{s / 2}"
+  }
+  let sign = if s < 0 {
+    "-"
+  } else {
+    ""
+  }
+  "{sign}{s.abs() / 2}.5"
+}
+
+pub fn main() -> Result[(), Error] uses io {
+  let text = io.read_all()
+  let toks = text.split_whitespace()
+  var xs: List[Int] = []
+  var tok_len = 0
+  for tok in toks {
+    if tok.starts_with("+") {
+      return Err(error("invalid token: {tok}"))
+    }
+    let v = tok.parse_int().ok_or(error("invalid token: {tok}"))?
+    xs.push(v)
+    tok_len += tok.len()
+  }
+  let rest = text
+    .replace(" ", "")
+    .replace("\t", "")
+    .replace("\n", "")
+    .replace("\r", "")
+    .replace("\u{b}", "")
+    .replace("\u{c}", "")
+  if rest.len() != tok_len {
+    return Err(error("input contains a non-integer token"))
+  }
+  if xs.is_empty() {
+    return Err(error("no integers in input"))
+  }
+  let sorted = xs.sorted()
+  let n = sorted.len()
+  var sum = 0
+  for x in sorted {
+    sum += x
+  }
+  io.println("min {sorted[0]}")
+  io.println("max {sorted[n - 1]}")
+  io.println("mean {fmt_mean(sum, n)}")
+  io.println("median {fmt_median(sorted)}")
+  Ok(())
+}

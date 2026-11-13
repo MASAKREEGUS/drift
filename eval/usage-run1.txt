@@ -1,0 +1,24 @@
+t01 drift 57590 14 105748 pass1
+t25 rust 38545 3 40236 pass1
+t01 rust 39106 3 52978 pass1
+t06 rust 41832 5 95299 pass1
+t10 rust 40408 6 141819 pass1
+t06 python 40965 5 151241 pass1
+t25 drift 54588 10 166384 pass1
+t01 python 45888 9 188772 pass1
+t25 python 39251 4 207987 pass1
+t10 python 42445 7 246099 pass1
+t10 drift 54387 12 254137 pass1
+t05 rust 41591 5 76505 pass1
+t05 python 43412 7 141846 pass1
+t06 drift 78028 ? ? pass1 (interrupted by rate limit; tokens=context at end, tool uses/time unknown; 2nd submission void: harness bug)
+t05 drift 59128 5 134345 pass1 (interrupted+resumed; counts = resumed segment only?)
+t03 rust 49399 4 226940 pass1 (interrupted+resumed; generated 64KB Unicode tables from python unicodedata)
+t03 drift 71110 9 242821 FAIL 12/16 (no exit-status API)
+t03 python 48211 7 238345 pass1 (interrupted+resumed)
+t12 rust 40615 5 79582 pass1
+t13 rust 41575 5 83078 pass1
+t12 drift 58439 16 303847 pass1
+t13 drift 65650 18 361555 pass1
+t12 python 49624 8 366183 pass1
+t13 python 65062 30 1013303 pass1

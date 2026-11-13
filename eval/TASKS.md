@@ -2,7 +2,9 @@
 
 Protocol: the agent receives `CARD.md` + one task. Hidden tests run on the result. Same task is solved in Python and Rust as baselines.
 Record per task and language: pass@1, pass@3 (with compiler/test feedback), iterations, tokens in/out, wall time, peak RSS on the HP.
-Each task lives in `eval/tasks/<id>/` with `task.md`, `tests/` (stdin/stdout pairs or HTTP fixtures) and `reference.dr` once the compiler exists.
+Implemented for 8 tasks (t01 t03 t05 t06 t10 t12 t13 t25): statements in `tasks/<id>.md`, hidden tests from
+`gen.py` (fixed seeds, expected outputs from `reference.py`) into `hidden/` (not committed), grading with
+`grade.py submit|bench|report`. Results of each run: `RESULTS.md`, final solutions in `solutions/<run>/`.
 
 | id | category | task |
 |---|---|---|

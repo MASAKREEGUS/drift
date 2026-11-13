@@ -1,0 +1,157 @@
+fn main() -> Result[(), Error] uses io {
+  let b = io.read_all().to_bytes() + b"    "
+  let blen = b.len() - 4
+  var nums: List[Int] = []
+  var cur = 0
+  var innum = false
+  var i = 0
+  while i < blen {
+    let c = b.read_u32_le(i) % 256
+    if c >= 48 and c <= 57 {
+      cur = cur * 10 + (c - 48)
+      innum = true
+    } else if innum {
+      nums.push(cur)
+      cur = 0
+      innum = false
+    }
+    i += 1
+  }
+  if innum {
+    nums.push(cur)
+  }
+  let n = nums[0]
+  let m = nums[1]
+  let s = nums[2 + 3 * m]
+  let t = nums[3 + 3 * m]
+  // CSR adjacency
+  var head: List[Int] = []
+  for _ in 0..n + 1 {
+    head.push(0)
+  }
+  for e in 0..m {
+    let u = nums[2 + 3 * e]
+    head[u + 1] += 1
+  }
+  for k in 0..n {
+    head[k + 1] += head[k]
+  }
+  var pos: List[Int] = []
+  for k in 0..n {
+    pos.push(head[k])
+  }
+  var adj_to: List[Int] = []
+  var adj_w: List[Int] = []
+  for _ in 0..m {
+    adj_to.push(0)
+    adj_w.push(0)
+  }
+  for e in 0..m {
+    let base = 2 + 3 * e
+    let u = nums[base]
+    let p = pos[u]
+    adj_to[p] = nums[base + 1]
+    adj_w[p] = nums[base + 2]
+    pos[u] = p + 1
+  }
+  // Dijkstra with lazy binary heap
+  let inf = 9000000000000000000
+  var dist: List[Int] = []
+  var par: List[Int] = []
+  var done: List[Bool] = []
+  for _ in 0..n {
+    dist.push(inf)
+    par.push(-1)
+    done.push(false)
+  }
+  var hd: List[Int] = []
+  var hv: List[Int] = []
+  var hsize = 0
+  dist[s] = 0
+  hd.push(0)
+  hv.push(s)
+  hsize = 1
+  while hsize > 0 {
+    let d = hd[0]
+    let u = hv[0]
+    // pop
+    hsize -= 1
+    let ld = hd[hsize]
+    let lv = hv[hsize]
+    hd.pop()
+    hv.pop()
+    if hsize > 0 {
+      var j = 0
+      loop {
+        let l = 2 * j + 1
+        if l >= hsize {
+          break
+        }
+        var c = l
+        if l + 1 < hsize and hd[l + 1] < hd[l] {
+          c = l + 1
+        }
+        if hd[c] < ld {
+          hd[j] = hd[c]
+          hv[j] = hv[c]
+          j = c
+        } else {
+          break
+        }
+      }
+      hd[j] = ld
+      hv[j] = lv
+    }
+    if done[u] or d > dist[u] {
+      continue
+    }
+    done[u] = true
+    if u == t {
+      break
+    }
+    var k = head[u]
+    let end = head[u + 1]
+    while k < end {
+      let v = adj_to[k]
+      let nd = d + adj_w[k]
+      if nd < dist[v] {
+        dist[v] = nd
+        par[v] = u
+        // push
+        hd.push(nd)
+        hv.push(v)
+        var j = hsize
+        hsize += 1
+        while j > 0 {
+          let pj = (j - 1) / 2
+          if hd[pj] > nd {
+            hd[j] = hd[pj]
+            hv[j] = hv[pj]
+            j = pj
+          } else {
+            break
+          }
+        }
+        hd[j] = nd
+        hv[j] = v
+      }
+      k += 1
+    }
+  }
+  if dist[t] == inf {
+    io.println("no path")
+    return Ok(())
+  }
+  var path: List[Str] = []
+  var x = t
+  while x != -1 {
+    path.push("{x}")
+    if x == s {
+      break
+    }
+    x = par[x]
+  }
+  io.println("cost {dist[t]}")
+  io.println("path " + path.reversed().join(" "))
+  Ok(())
+}

@@ -1,0 +1,68 @@
+/// Number of primes p <= n (Lucy Hedgehog prime counting, O(n^(3/4))).
+fn prime_pi(n: Int) -> Int {
+  if n < 2 {
+    return 0
+  }
+  var r = 1
+  while (r + 1) * (r + 1) <= n {
+    r += 1
+  }
+  // lo[v] = count for v (v <= r); hi[i] = count for n / i (i <= r)
+  var lo: List[Int] = []
+  var hi: List[Int] = []
+  for v in 0..=r {
+    lo.push(
+      if v == 0 {
+        0
+      } else {
+        v - 1
+      },
+    )
+    hi.push(
+      if v == 0 {
+        0
+      } else {
+        n / v - 1
+      },
+    )
+  }
+  for p in 2..=r {
+    if lo[p] != lo[p - 1] {
+      let sp = lo[p - 1]
+      let p2 = p * p
+      let limit = r.min(n / p2)
+      var i = 1
+      while i <= limit {
+        let d = i * p
+        if d <= r {
+          hi[i] = hi[i] - (hi[d] - sp)
+        } else {
+          hi[i] = hi[i] - (lo[n / d] - sp)
+        }
+        i += 1
+      }
+      var v = r
+      while v >= p2 {
+        lo[v] = lo[v] - (lo[v / p] - sp)
+        v -= 1
+      }
+    }
+  }
+  hi[1]
+}
+
+examples prime_pi {
+  prime_pi(0) == 0
+  prime_pi(1) == 0
+  prime_pi(2) == 1
+  prime_pi(9) == 4
+  prime_pi(10) == 4
+  prime_pi(100) == 25
+}
+
+pub fn main() -> Result[(), Error] uses io {
+  let text = io.read_all().trim()
+  let n = text.parse_int().unwrap_or(0)
+  io.println("{prime_pi(n - 1)}")
+  Ok(())
+}

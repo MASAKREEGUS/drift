@@ -2,3 +2,6 @@ target/
 /build/
 *.o
 .env
+eval/hidden/
+eval/results/
+__pycache__/

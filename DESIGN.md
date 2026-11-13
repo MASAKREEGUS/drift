@@ -161,6 +161,6 @@ own: `!x` → `not x` (`drift check --fix`).
 | 2 | Name resolution, types with local inference, effects, JSON diagnostics with fixes, `todo` holes |
 | 3 | ✅ C backend + runtime (refcount, copy-on-write Str/Bytes/List/Map/Set), `drift run/build/test`, contracts, isolated tests |
 | 4 | std: io, fs, json, str, time, env, proc, http client, re, html, db (sqlite/postgres); sandbox from `uses` |
-| 5 | ✅ Tasks + `spawn`/`par_map`/channels runtime (parallel, shared refcounts); next: `drift mcp`; eval runs vs Python/Rust |
+| 5 | ✅ Tasks + `spawn`/`par_map`/channels runtime; `drift mcp`; eval run1 vs Python/Rust (`eval/RESULTS.md`): pass@1 Drift 7/8, Python 8/8, Rust 8/8; Drift ≈ 0.8x Python CPU, 5–13x Rust |
 | 6 | ✅ Real workload: El Dato identity.py ported, identical on 557,863 products, 1.6x less CPU than Python |
 | 7 | Self-hosting; own backend (connects to the compiler project) |

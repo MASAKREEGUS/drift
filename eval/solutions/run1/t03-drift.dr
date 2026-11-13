@@ -1,0 +1,65 @@
+fn parse_n(arg: Str) -> Option[Int] {
+  if arg.is_empty() {
+    return None
+  }
+  var nonzero = false
+  for c in arg.chars() {
+    if c < "0" or c > "9" {
+      return None
+    }
+    if c != "0" {
+      nonzero = true
+    }
+  }
+  if not nonzero {
+    return None
+  }
+  Some(arg.parse_int().unwrap_or(9000000000000000000))
+}
+
+fn word_of(cs: List[Str], start: Int, end: Int) -> Str {
+  let raw = cs.slice(start, end).join("")
+  if raw.ends_with("Σ") {
+    let t = (raw + " ").to_lower()
+    t.slice(0, t.chars().len() - 1)
+  } else {
+    raw.to_lower()
+  }
+}
+
+fn main() -> Result[(), Error] uses io, env {
+  let args = env.args()
+  let arg = args.get(1).ok_or(error("usage: program N (N a positive integer)"))?
+  let n = parse_n(arg).ok_or(error("N must be a positive integer, got `{arg}`"))?
+  var counts: Map[Str, Int] = {}
+  loop {
+    let line = match io.read_line() {
+      Some(l) => l
+      None => break
+    }
+    for tok in line.split_whitespace() {
+      let cs = tok.chars()
+      var start = -1
+      for (i, c) in cs.enumerate() {
+        if c.is_alphanumeric() {
+          if start < 0 {
+            start = i
+          }
+        } else if start >= 0 {
+          let w = word_of(cs, start, i)
+          counts[w] = counts.get(w).unwrap_or(0) + 1
+          start = -1
+        }
+      }
+      if start >= 0 {
+        let w = word_of(cs, start, cs.len())
+        counts[w] = counts.get(w).unwrap_or(0) + 1
+      }
+    }
+  }
+  let ranked = counts.entries().sorted_by(|(w, k)| (0 - k, w))
+  for (w, k) in ranked.take(n.min(ranked.len())) {
+    io.println("{k} {w}")
+  }
+  Ok(())
+}

@@ -1,0 +1,198 @@
+struct Heap { data: List[Int] }
+
+fn push(var self: Heap, x: Int) -> () {
+  self.data.push(x)
+  var i = self.data.len() - 1
+  while i > 0 {
+    let p = (i - 1) / 2
+    let pv = self.data[p]
+    if pv <= x {
+      break
+    }
+    self.data[i] = pv
+    i = p
+  }
+  self.data[i] = x
+}
+
+fn pop_min(var self: Heap) -> Int {
+  let top = self.data[0]
+  let last = self.data.pop().unwrap_or(0)
+  let n = self.data.len()
+  if n > 0 {
+    var i = 0
+    loop {
+      let l = 2 * i + 1
+      if l >= n {
+        break
+      }
+      var c = l
+      if l + 1 < n and self.data[l + 1] < self.data[l] {
+        c = l + 1
+      }
+      if self.data[c] >= last {
+        break
+      }
+      self.data[i] = self.data[c]
+      i = c
+    }
+    self.data[i] = last
+  }
+  top
+}
+
+fn build_csr(n: Int, src: List[Int], dst: List[Int]) -> (List[Int], List[Int]) {
+  var start: List[Int] = []
+  for _ in 0..n + 1 {
+    start.push(0)
+  }
+  for s in src {
+    start[s + 1] = start[s + 1] + 1
+  }
+  for i in 0..n {
+    start[i + 1] = start[i + 1] + start[i]
+  }
+  var pos = start
+  var out: List[Int] = []
+  for _ in 0..src.len() {
+    out.push(0)
+  }
+  for (k, s) in src.enumerate() {
+    out[pos[s]] = dst[k]
+    pos[s] = pos[s] + 1
+  }
+  (start, out)
+}
+
+fn main() -> Result[(), Error] uses io {
+  let text = io.read_all()
+  var pid: Map[Str, Int] = {}
+  var pnames: List[Str] = []
+  var psrc: List[Int] = []
+  var pdst: List[Int] = []
+  for line in text.lines() {
+    let t = line.trim()
+    if t.is_empty() {
+      continue
+    }
+    match t.find("->") {
+      Some(i) => {
+        let a = t.slice(0, i).trim()
+        let b = t.slice(i + 2, t.len()).trim()
+        let ia = match pid.get(a) {
+          Some(x) => x
+          None => {
+            let x = pnames.len()
+            pid[a] = x
+            pnames.push(a)
+            x
+          }
+        }
+        let ib = match pid.get(b) {
+          Some(x) => x
+          None => {
+            let x = pnames.len()
+            pid[b] = x
+            pnames.push(b)
+            x
+          }
+        }
+        psrc.push(ia)
+        pdst.push(ib)
+      }
+      None => {
+        if not pid.contains_key(t) {
+          pid[t] = pnames.len()
+          pnames.push(t)
+        }
+      }
+    }
+  }
+  let n = pnames.len()
+  let perm = pnames.enumerate().sorted_by(|(_, nm)| nm).map(|(i, _)| i)
+  var rank: List[Int] = []
+  for _ in 0..n {
+    rank.push(0)
+  }
+  var names: List[Str] = []
+  for (r, i) in perm.enumerate() {
+    rank[i] = r
+    names.push(pnames[i])
+  }
+  let src = psrc.map(|x| rank[x])
+  let dst = pdst.map(|x| rank[x])
+  let (fstart, fadj) = build_csr(n, src, dst)
+  var indeg: List[Int] = []
+  for _ in 0..n {
+    indeg.push(0)
+  }
+  for d in dst {
+    indeg[d] = indeg[d] + 1
+  }
+  var heap = Heap { data: [] }
+  for i in 0..n {
+    if indeg[i] == 0 {
+      heap.push(i)
+    }
+  }
+  var order: List[Int] = []
+  while heap.data.len() > 0 {
+    let v = heap.pop_min()
+    order.push(v)
+    for e in fstart[v]..fstart[v + 1] {
+      let w = fadj[e]
+      indeg[w] = indeg[w] - 1
+      if indeg[w] == 0 {
+        heap.push(w)
+      }
+    }
+  }
+  if order.len() == n {
+    var outl: List[Str] = []
+    for v in order {
+      outl.push(names[v])
+    }
+    if n > 0 {
+      io.print(outl.join("\n") + "\n")
+    }
+    return Ok(())
+  }
+  // cycle: walk backwards through remaining nodes (indeg > 0)
+  let (rstart, radj) = build_csr(n, dst, src)
+  var start_node = 0
+  for i in 0..n {
+    if indeg[i] > 0 {
+      start_node = i
+      break
+    }
+  }
+  var seen_at: List[Int] = []
+  for _ in 0..n {
+    seen_at.push(-1)
+  }
+  var walk: List[Int] = []
+  var cur = start_node
+  while seen_at[cur] < 0 {
+    seen_at[cur] = walk.len()
+    walk.push(cur)
+    var nxt = -1
+    for e in rstart[cur]..rstart[cur + 1] {
+      let p = radj[e]
+      if indeg[p] > 0 {
+        nxt = p
+        break
+      }
+    }
+    cur = nxt
+  }
+  let i0 = seen_at[cur]
+  var parts: List[Str] = [names[cur]]
+  var k = walk.len() - 1
+  while k > i0 {
+    parts.push(names[walk[k]])
+    k -= 1
+  }
+  parts.push(names[cur])
+  io.println("cycle: " + parts.join(" -> "))
+  Err(error("cycle"))
+}

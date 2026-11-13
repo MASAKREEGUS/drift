@@ -1,0 +1,183 @@
+// Expression evaluator: one expression per input line.
+// Works on bytes (all valid characters are ASCII); columns are exact because the first invalid
+// byte is reported before any non-ASCII character could shift later columns.
+
+struct Ev { vals: List[Int], ops: List[Int], cols: List[Int], err: Int }
+
+const UNARY: Int = 1
+
+const LPAREN: Int = 40
+
+fn at(b: Bytes, i: Int) -> Int {
+  b.read_u32_le(i) % 256
+}
+
+fn is_digit(x: Int) -> Bool {
+  x >= 48 and x <= 57
+}
+
+fn is_space(x: Int) -> Bool {
+  x == 32 or x == 9
+}
+
+fn is_op(x: Int) -> Bool {
+  x == 43 or x == 45 or x == 42 or x == 47 or x == 37 or x == 40 or x == 41
+}
+
+fn prec(op: Int) -> Int {
+  if op == 43 or op == 45 {
+    1
+  } else if op == UNARY {
+    3
+  } else {
+    2
+  }
+}
+
+/// Applies the operator on top of the stack. After the first division by zero only the stack
+/// shape is maintained.
+fn reduce(var self: Ev) -> () {
+  let op = self.ops.pop().unwrap_or(0)
+  let col = self.cols.pop().unwrap_or(0)
+  if op == UNARY {
+    let a = self.vals.pop().unwrap_or(0)
+    self.vals.push(0 - a)
+  } else {
+    let r = self.vals.pop().unwrap_or(0)
+    let l = self.vals.pop().unwrap_or(0)
+    if self.err > 0 {
+      self.vals.push(0)
+    } else if op == 43 {
+      self.vals.push(l + r)
+    } else if op == 45 {
+      self.vals.push(l - r)
+    } else if op == 42 {
+      self.vals.push(l * r)
+    } else if r == 0 {
+      self.err = col
+      self.vals.push(0)
+    } else if op == 47 {
+      self.vals.push(l / r)
+    } else {
+      self.vals.push(l - l / r * r)
+    }
+  }
+}
+
+fn eval_line(b: Bytes, s: Int, e: Int) -> Str {
+  var i = s
+  while i < e {
+    let x = at(b, i)
+    if not (is_digit(x) or is_space(x) or is_op(x)) {
+      return "error at {i - s + 1}: unexpected character"
+    }
+    i += 1
+  }
+  var ev = Ev { vals: [], ops: [], cols: [], err: 0 }
+  var expect_operand = true
+  var depth = 0
+  i = s
+  while i < e {
+    let c = at(b, i)
+    let col = i - s + 1
+    if is_space(c) {
+      i += 1
+      continue
+    }
+    if is_digit(c) {
+      if not expect_operand {
+        return "error at {col}: unexpected token"
+      }
+      var v = 0
+      while i < e and is_digit(at(b, i)) {
+        v = v * 10 + (at(b, i) - 48)
+        i += 1
+      }
+      ev.vals.push(v)
+      expect_operand = false
+      continue
+    }
+    i += 1
+    if expect_operand {
+      if c == 45 {
+        ev.ops.push(UNARY)
+        ev.cols.push(col)
+      } else if c == LPAREN {
+        ev.ops.push(LPAREN)
+        ev.cols.push(col)
+        depth += 1
+      } else {
+        return "error at {col}: unexpected token"
+      }
+    } else if c == 41 {
+      if depth == 0 {
+        return "error at {col}: unexpected token"
+      }
+      while ev.ops.last() != Some(LPAREN) {
+        ev.reduce()
+      }
+      ev.ops.pop()
+      ev.cols.pop()
+      depth -= 1
+    } else if c == LPAREN {
+      return "error at {col}: unexpected token"
+    } else {
+      let p = prec(c)
+      while not ev.ops.is_empty() and
+        ev.ops.last() != Some(LPAREN) and
+        prec(ev.ops.last().unwrap_or(0)) >= p {
+        ev.reduce()
+      }
+      ev.ops.push(c)
+      ev.cols.push(col)
+      expect_operand = true
+    }
+  }
+  if expect_operand or depth > 0 {
+    return "error at {e - s + 1}: unexpected end"
+  }
+  while not ev.ops.is_empty() {
+    ev.reduce()
+  }
+  if ev.err > 0 {
+    return "error at {ev.err}: division by zero"
+  }
+  "{ev.vals.last().unwrap_or(0)}"
+}
+
+fn is_blank(b: Bytes, s: Int, e: Int) -> Bool {
+  var i = s
+  while i < e {
+    if not is_space(at(b, i)) {
+      return false
+    }
+    i += 1
+  }
+  true
+}
+
+pub fn main() -> Result[(), Error] uses io {
+  let text = io.read_all()
+  let b = (text + "   ").bytes()
+  let total = b.len() - 3
+  var out: List[Str] = []
+  var s = 0
+  while s < total {
+    var e = s
+    while e < total and at(b, e) != 10 {
+      e += 1
+    }
+    var le = e
+    if le > s and at(b, le - 1) == 13 {
+      le -= 1
+    }
+    if not is_blank(b, s, le) {
+      out.push(eval_line(b, s, le))
+    }
+    s = e + 1
+  }
+  if not out.is_empty() {
+    io.print(out.join("\n") + "\n")
+  }
+  Ok(())
+}

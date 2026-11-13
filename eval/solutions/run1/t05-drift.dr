@@ -1,0 +1,90 @@
+struct Conv {
+  header: List[Str]
+  have_header: Bool
+  out: List[Str]
+  fields: List[Str]
+  cur: List[Str]
+  started: Bool
+}
+
+fn end_field(var self: Conv) -> () {
+  self.fields.push(self.cur.join(""))
+  self.cur = []
+}
+
+fn end_record(var self: Conv) -> Result[(), Error] {
+  self.end_field()
+  let fields = self.fields
+  self.fields = []
+  self.started = false
+  if not self.have_header {
+    self.header = fields.map(|h| json.encode(h))
+    self.have_header = true
+    return Ok(())
+  }
+  if fields.len() != self.header.len() {
+    return Err(error("record has {fields.len()} fields, header has {self.header.len()}"))
+  }
+  var parts: List[Str] = []
+  for (k, f) in fields.enumerate() {
+    parts.push(self.header[k] + ":" + json.encode(f))
+  }
+  self.out.push("\{" + parts.join(",") + "\}")
+  Ok(())
+}
+
+fn main() -> Result[(), Error] uses io {
+  let segs = io.read_all().split("\"")
+  let m = segs.len()
+  if m % 2 == 0 {
+    return Err(error("unterminated quoted field"))
+  }
+  var c = Conv { header: [], have_header: false, out: [], fields: [], cur: [], started: false }
+  for (k, s) in segs.enumerate() {
+    let last = k == m - 1
+    if k % 2 == 1 {
+      c.cur.push(s)
+      c.started = true
+    } else if k > 0 and not last and s.is_empty() {
+      c.cur.push("\"")
+    } else {
+      if k > 0 and
+        not (s.is_empty() or s.starts_with(",") or s.starts_with("\n") or s.starts_with("\r\n")) {
+        return Err(error("unexpected character after closing quote"))
+      }
+      if not last and not (s.is_empty() or s.ends_with(",") or s.ends_with("\n")) {
+        return Err(error("quote inside unquoted field"))
+      }
+      let lines = s.split("\n")
+      let nl = lines.len()
+      for (li, line0) in lines.enumerate() {
+        let is_last_line = li == nl - 1
+        let line = if not is_last_line and line0.ends_with("\r") {
+          line0.slice(0, line0.len() - 1)
+        } else {
+          line0
+        }
+        for (pi, p) in line.split(",").enumerate() {
+          if pi > 0 {
+            c.end_field()
+            c.started = true
+          }
+          if not p.is_empty() {
+            c.cur.push(p)
+            c.started = true
+          }
+        }
+        if not is_last_line {
+          c.end_record()?
+        }
+      }
+      if not last {
+        c.started = true
+      } else if c.started {
+        c.end_record()?
+      }
+    }
+  }
+  io.println("[" + c.out.join(",\n") + "]")
+  Ok(())
+}
